@@ -20,6 +20,31 @@ async fn main() -> Result<()> {
     // Write sample config if first run
     let _ = config::Config::write_sample();
 
+    // Create image picker BEFORE entering raw mode so the stdio query works correctly.
+    // The picker probes the terminal for graphics protocol support (Kitty/Sixel/iTerm2)
+    // by writing escape sequences to stdout and reading responses from stdin.
+    let mut image_picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::from_fontsize((8, 16)));
+
+    // The library's iterm2_from_env() maps "vscode" → Iterm2, but VS Code's terminal
+    // (xterm.js) actually supports Sixel, not iTerm2 inline images (OSC 1337).
+    // Override to Sixel for VS Code so we get proper image rendering.
+    let term_prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    if term_prog.contains("vscode") {
+        image_picker.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+    } else if image_picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
+        // Safety net for other terminals: override Halfblocks → Iterm2 where supported.
+        if term_prog.contains("iTerm")
+            || term_prog.contains("WezTerm")
+            || term_prog.contains("mintty")
+            || term_prog.contains("Tabby")
+            || term_prog.contains("Hyper")
+            || term_prog.contains("rio")
+        {
+            image_picker.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
+        }
+    }
+
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -27,7 +52,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new().await?;
+    let mut app = App::new(image_picker).await?;
     let result  = run(&mut terminal, &mut app).await;
 
     // Always restore terminal, even on error

@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 const TMDB_BASE: &str = "https://api.themoviedb.org/3";
-const TMDB_IMAGE: &str = "https://image.tmdb.org/t/p/w500";
+const TMDB_IMAGE: &str = "https://image.tmdb.org/t/p/w1280";
 
 /// Read TMDB_API_KEY from environment or config
 fn api_key() -> Result<String> {

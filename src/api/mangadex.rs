@@ -103,7 +103,7 @@ fn raw_to_item(r: RawManga) -> MangaItem {
             .as_ref()?
             .get("fileName")?
             .as_str()
-            .map(|f| format!("{MANGADEX_COVERS}/{}/{f}.512.jpg", r.id))
+            .map(|f| format!("{MANGADEX_COVERS}/{}/{f}", r.id))
     });
 
     // Author

@@ -116,9 +116,11 @@ pub fn draw_results(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(if eps.is_empty() { "".to_string() } else { format!("  {}", eps) }, Style::default().fg(C_DIM)),
             ]),
             Line::from(vec![
-                Span::styled(format!(" {} ", year), Style::default().fg(C_DIM)),
-                Span::styled(format!("★{} ", score), Style::default().fg(C_SCORE)),
-                Span::styled(format!(" {}", item.source_badge()), Style::default().fg(Color::Rgb(60,60,60))),
+                Span::styled(format!(" {}", year), Style::default().fg(C_DIM)),
+                Span::styled("  ", Style::default()),
+                Span::styled("★ ", Style::default().fg(C_SCORE)),
+                Span::styled(format!("{}", score), Style::default().fg(C_SCORE)),
+                Span::styled(format!("  {}", item.source_badge()), Style::default().fg(Color::Rgb(60,60,60))),
             ]),
         ]).block(item_block);
 

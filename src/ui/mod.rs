@@ -32,7 +32,7 @@ pub const C_SCORE:    Color = Color::Rgb(255, 200, 0  );  // score stars
 
 // ── Master draw ───────────────────────────────────────────────────────────────
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     // Fill entire terminal with pure black first
@@ -119,7 +119,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
 // ── Body ──────────────────────────────────────────────────────────────────────
 
-fn draw_body(f: &mut Frame, app: &App, area: Rect) {
+fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
     // Fill body
     f.render_widget(
         Block::default().style(Style::default().bg(C_BG)),
@@ -140,16 +140,16 @@ fn draw_body(f: &mut Frame, app: &App, area: Rect) {
     draw_right(f, app, cols[1]);
 }
 
-fn draw_right(f: &mut Frame, app: &App, area: Rect) {
+fn draw_right(f: &mut Frame, app: &mut App, area: Rect) {
     let rows = Layout::vertical([
-        Constraint::Percentage(45),
+        Constraint::Percentage(55),
         Constraint::Min(0),
     ]).split(area);
 
     let top = Layout::horizontal([
-        Constraint::Length(20),
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
+        Constraint::Percentage(35),
+        Constraint::Percentage(30),
+        Constraint::Min(0),
     ]).split(rows[0]);
 
     image::draw_cover(f, app, top[0]);

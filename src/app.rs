@@ -125,11 +125,13 @@ pub struct App {
     pub status:   String,
 
     pub image_protocol: ImageProtocol,
+    pub image_picker: ratatui_image::picker::Picker,
+    pub cover_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
     pub needs_redraw: bool,
 }
 
 impl App {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(image_picker: ratatui_image::picker::Picker) -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let db      = Arc::new(HistoryStore::open()?);
         let history = db.load_all()?;
@@ -167,6 +169,8 @@ impl App {
             toasts:   Vec::new(),
             status:   "Type to search  •  F1-F5 switch tabs".to_string(),
             image_protocol: protocol,
+            image_picker,
+            cover_protocol: None,
             needs_redraw:  false,
         })
     }
@@ -228,7 +232,25 @@ impl App {
                 self.status = format!("{} results  (+{added} more)", self.results.len());
             }
             AppMsg::DetailLoaded(item)  => { self.selected = Some(item); self.detail_scroll = 0; }
-            AppMsg::ImageLoaded(bytes)  => { self.cover_image = Some(bytes); }
+            AppMsg::ImageLoaded(bytes)  => {
+                self.cover_protocol = None;
+                // Save raw image to ~/Desktop/nexus-debug/ for analysis
+                if let Ok(home) = std::env::var("HOME") {
+                    let debug_dir = std::path::PathBuf::from(&home).join("Desktop").join("nexus-debug");
+                    let _ = std::fs::create_dir_all(&debug_dir);
+                    let name = self.selected.as_ref()
+                        .map(|s| s.title().replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_"))
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let ext = if bytes.starts_with(b"\x89PNG") { "png" } else { "jpg" };
+                    let path = debug_dir.join(format!("{name}.{ext}"));
+                    let _ = std::fs::write(&path, &bytes);
+                }
+                if let Ok(img) = image::load_from_memory(&bytes) {
+                    let dyn_img = image::DynamicImage::ImageRgba8(img.into_rgba8());
+                    self.cover_protocol = Some(self.image_picker.new_resize_protocol(dyn_img));
+                }
+                self.cover_image = Some(bytes);
+            }
             AppMsg::RecsLoaded(items)   => { self.recommendations = items; self.recs_idx = 0; }
             AppMsg::StreamUrl(url) => {
                 self.is_searching = false;
@@ -441,6 +463,7 @@ impl App {
         self.results.clear();
         self.selected    = None;
         self.cover_image = None;
+        self.cover_protocol = None;
         self.recommendations.clear();
         self.search_input.clear();
         self.search_cursor = 0;
@@ -509,6 +532,7 @@ impl App {
 
     fn load_detail(&mut self, item: ContentItem) {
         self.cover_image = None;
+        self.cover_protocol = None;
         self.recommendations.clear();
 
         // Cover art
@@ -516,14 +540,30 @@ impl App {
             let tx = self.msg_tx.clone();
             tokio::spawn(async move {
                 let client = reqwest::Client::builder()
-                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+                    .timeout(Duration::from_secs(15))
+                    .connect_timeout(Duration::from_secs(8))
                     .build().unwrap_or_default();
-                match client.get(&url).send().await {
-                    Ok(r) => match r.bytes().await {
-                        Ok(b) => { let _ = tx.send(AppMsg::ImageLoaded(b.to_vec())); }
-                        Err(e) => { let _ = tx.send(AppMsg::Error(format!("Image bytes: {e}"))); }
-                    },
-                    Err(e) => { let _ = tx.send(AppMsg::Error(format!("Image fetch: {e}"))); }
+                for attempt in 0..2u8 {
+                    match client.get(&url)
+                        .header("Accept", "image/*")
+                        .send().await
+                    {
+                        Ok(r) if r.status().is_success() => {
+                            match r.bytes().await {
+                                Ok(b) => { let _ = tx.send(AppMsg::ImageLoaded(b.to_vec())); return; }
+                                Err(_) if attempt == 0 => continue,
+                                Err(e) => { let _ = tx.send(AppMsg::Error(format!("Image bytes: {e}"))); return; }
+                            }
+                        }
+                        Ok(_) if attempt == 0 => continue,
+                        Ok(r) => { let _ = tx.send(AppMsg::Error(format!("Image HTTP {}", r.status()))); return; }
+                        Err(_) if attempt == 0 => {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            continue;
+                        }
+                        Err(e) => { let _ = tx.send(AppMsg::Error(format!("Image fetch: {e}"))); return; }
+                    }
                 }
             });
         }
@@ -694,7 +734,16 @@ impl App {
         if self.toasts.len() > 4 { self.toasts.remove(0); }
     }
 
-    pub fn on_resize(&mut self) {}
+    pub fn on_resize(&mut self) {
+        // Don't re-query stdio — we're already in raw mode.
+        // Just re-create the cover protocol so it re-renders at the new size.
+        if let Some(bytes) = self.cover_image.clone() {
+            if let Ok(img) = image::load_from_memory(&bytes) {
+                let dyn_img = image::DynamicImage::ImageRgba8(img.into_rgba8());
+                self.cover_protocol = Some(self.image_picker.new_resize_protocol(dyn_img));
+            }
+        }
+    }
 }
 
 // ── Protocol detection ────────────────────────────────────────────────────────
