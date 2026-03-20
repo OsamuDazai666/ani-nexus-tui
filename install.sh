@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # nexus-tui installer — Linux & macOS
-# Usage: curl -fsSL https://raw.githubusercontent.com/YOU/nexus-tui/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.sh | bash
 
 set -e
 
-REPO="YOU/nexus-tui"
+REPO="OsamuDazai666/nexus-tui"
 BOLD="\033[1m"
 RED="\033[31m"
 GREEN="\033[32m"
@@ -58,6 +58,29 @@ install_pkg() {
     echo -e "${YELLOW}⚠  Cannot auto-install $pkg — please install it manually${RESET}"
     return 1
   fi
+}
+
+# ── build_from_source — defined here so it's available when called below ──────
+
+build_from_source() {
+  if ! has cargo; then
+    echo -e "${CYAN}Installing Rust...${RESET}"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+  fi
+
+  if [ "$PLATFORM" = "linux" ]; then
+    has apt-get && sudo apt-get install -y build-essential pkg-config libssl-dev
+  fi
+
+  TMP=$(mktemp -d)
+  echo -e "${CYAN}Cloning nexus-tui...${RESET}"
+  git clone "https://github.com/${REPO}.git" "$TMP/nexus-tui"
+  cd "$TMP/nexus-tui"
+  cargo build --release
+  cp target/release/nexus "$INSTALL_DIR/nexus"
+  cd - && rm -rf "$TMP"
+  echo -e "${GREEN}✓ Built and installed${RESET}"
 }
 
 # ── Homebrew (macOS) ──────────────────────────────────────────────────────────
@@ -170,24 +193,3 @@ echo ""
 echo -e "${GREEN}${BOLD}Done! Run nexus in your terminal.${RESET}"
 echo -e "${DIM}  Tip: run inside Kitty for best image quality${RESET}"
 echo ""
-
-build_from_source() {
-  if ! has cargo; then
-    echo -e "${CYAN}Installing Rust...${RESET}"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
-  fi
-
-  if [ "$PLATFORM" = "linux" ]; then
-    has apt-get && sudo apt-get install -y build-essential pkg-config libssl-dev
-  fi
-
-  TMP=$(mktemp -d)
-  echo -e "${CYAN}Cloning nexus-tui...${RESET}"
-  git clone "https://github.com/${REPO}.git" "$TMP/nexus-tui"
-  cd "$TMP/nexus-tui"
-  cargo build --release
-  cp target/release/nexus "$INSTALL_DIR/nexus"
-  cd - && rm -rf "$TMP"
-  echo -e "${GREEN}✓ Built and installed${RESET}"
-}

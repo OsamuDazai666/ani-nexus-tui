@@ -1,14 +1,51 @@
 # nexus-tui installer for Windows
 # Usage (run in PowerShell as Administrator):
-#   irm https://raw.githubusercontent.com/YOU/nexus-tui/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
-$REPO = "YOU/nexus-tui"
+$REPO = "OsamuDazai666/nexus-tui"
 $INSTALL_DIR = "$env:LOCALAPPDATA\nexus-tui"
 
 function Write-Step  { Write-Host "  $args" -ForegroundColor Cyan }
 function Write-Ok    { Write-Host "  ✓ $args" -ForegroundColor Green }
 function Write-Warn  { Write-Host "  ⚠ $args" -ForegroundColor Yellow }
+
+# ── Refresh PATH from environment (replaces refreshenv) ──────────────────────
+
+function Update-SessionPath {
+    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("PATH", "User")
+}
+
+# ── Build from source — defined here so it's available when called below ──────
+
+function Build-FromSource {
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        if (-not $HAS_WINGET) {
+            Write-Warn "winget not found — please install Rust manually from https://rustup.rs then re-run this script"
+            exit 1
+        }
+        Write-Step "Installing Rust..."
+        winget install --id Rustlang.Rustup -e --silent
+        Update-SessionPath
+    }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        if (-not $HAS_WINGET) {
+            Write-Warn "winget not found — please install Git manually from https://git-scm.com then re-run this script"
+            exit 1
+        }
+        winget install --id Git.Git -e --silent
+        Update-SessionPath
+    }
+    $TMP = "$env:TEMP\nexus-build"
+    git clone "https://github.com/$REPO.git" $TMP
+    Push-Location $TMP
+    cargo build --release
+    Pop-Location
+    Copy-Item "target\release\nexus.exe" $BINARY_PATH
+    Remove-Item $TMP -Recurse -Force
+    Write-Ok "Built from source"
+}
 
 Write-Host ""
 Write-Host "  ◆ nexus-tui installer" -ForegroundColor Yellow -BackgroundColor Black
@@ -16,14 +53,15 @@ Write-Host ""
 
 # ── Winget / Scoop check ──────────────────────────────────────────────────────
 
-$HAS_WINGET = Get-Command winget -ErrorAction SilentlyContinue
-$HAS_SCOOP  = Get-Command scoop  -ErrorAction SilentlyContinue
+$HAS_WINGET = [bool](Get-Command winget -ErrorAction SilentlyContinue)
+$HAS_SCOOP  = [bool](Get-Command scoop  -ErrorAction SilentlyContinue)
 
 if (-not $HAS_SCOOP) {
     Write-Step "Installing Scoop package manager..."
     Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
     Invoke-RestMethod get.scoop.sh | Invoke-Expression
     $env:PATH += ";$env:USERPROFILE\scoop\shims"
+    $HAS_SCOOP = $true
     Write-Ok "Scoop installed"
 }
 
@@ -87,7 +125,7 @@ Write-Host ""
 Write-Step "Downloading nexus-tui..."
 New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
 
-$BINARY_URL = "https://github.com/$REPO/releases/latest/download/nexus-windows-x86_64.exe"
+$BINARY_URL  = "https://github.com/$REPO/releases/latest/download/nexus-windows-x86_64.exe"
 $BINARY_PATH = "$INSTALL_DIR\nexus.exe"
 
 try {
@@ -111,7 +149,9 @@ if ($CURRENT_PATH -notlike "*$INSTALL_DIR*") {
 
 # ── Desktop shortcut (opens in Kitty) ─────────────────────────────────────────
 
-$KITTY_PATH = (Get-Command kitty -ErrorAction SilentlyContinue)?.Source
+$kittyCmd  = Get-Command kitty -ErrorAction SilentlyContinue
+$KITTY_PATH = if ($kittyCmd) { $kittyCmd.Source } else { $null }
+
 if ($KITTY_PATH) {
     $SHORTCUT_PATH = "$env:USERPROFILE\Desktop\nexus-tui.lnk"
     $WSH = New-Object -ComObject WScript.Shell
@@ -127,23 +167,3 @@ if ($KITTY_PATH) {
 Write-Host ""
 Write-Host "  ◆ Done! Type 'nexus' in Kitty to launch." -ForegroundColor Yellow
 Write-Host ""
-
-function Build-FromSource {
-    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        Write-Step "Installing Rust..."
-        winget install --id Rustlang.Rustup -e --silent
-        refreshenv
-    }
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        winget install --id Git.Git -e --silent
-        refreshenv
-    }
-    $TMP = "$env:TEMP\nexus-build"
-    git clone "https://github.com/$REPO.git" $TMP
-    Set-Location $TMP
-    cargo build --release
-    Copy-Item "target\release\nexus.exe" $BINARY_PATH
-    Set-Location $env:USERPROFILE
-    Remove-Item $TMP -Recurse -Force
-    Write-Ok "Built from source"
-}
