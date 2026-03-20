@@ -20,15 +20,7 @@ function Update-SessionPath {
 # ── Build from source ─────────────────────────────────────────────────────────
 
 function Build-FromSource {
-    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        if (-not $HAS_WINGET) {
-            Write-Warn "winget not found — please install Rust manually from https://rustup.rs then re-run this script"
-            exit 1
-        }
-        Write-Step "Installing Rust..."
-        winget install --id Rustlang.Rustup -e --silent
-        Update-SessionPath
-    }
+    # ── Git ───────────────────────────────────────────────────────────────────
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         if (-not $HAS_WINGET) {
             Write-Warn "winget not found — please install Git manually from https://git-scm.com then re-run this script"
@@ -38,12 +30,62 @@ function Build-FromSource {
         winget install --id Git.Git -e --silent
         Update-SessionPath
     }
+
+    # ── Rust (GNU toolchain — no Visual Studio needed) ────────────────────────
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        if (-not $HAS_WINGET) {
+            Write-Warn "winget not found — please install Rust manually from https://rustup.rs then re-run this script"
+            exit 1
+        }
+        Write-Step "Installing Rust..."
+        winget install --id Rustlang.Rustup -e --silent
+        Update-SessionPath
+    }
+
+    # Switch to GNU toolchain to avoid needing Visual Studio / MSVC linker
+    Write-Step "Configuring Rust GNU toolchain (avoids ~3GB Visual Studio install)..."
+    rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update | Out-Null
+    rustup default stable-x86_64-pc-windows-gnu | Out-Null
+
+    # ── mingw64 (provides the GNU linker) ─────────────────────────────────────
+    if (-not (Get-Command x86_64-w64-mingw32-gcc -ErrorAction SilentlyContinue)) {
+        Write-Step "Installing mingw-w64 (GNU linker for Rust)..."
+        if ($HAS_SCOOP) {
+            scoop install mingw
+        } elseif ($HAS_WINGET) {
+            winget install --id MSYS2.MSYS2 -e --silent
+            # Add mingw64 bin to PATH
+            $mingwBin = "C:\msys64\mingw64\bin"
+            if (Test-Path $mingwBin) {
+                $env:PATH += ";$mingwBin"
+                $current = [System.Environment]::GetEnvironmentVariable("PATH", "User")
+                [System.Environment]::SetEnvironmentVariable("PATH", "$current;$mingwBin", "User")
+            }
+        } else {
+            Write-Warn "Could not install mingw-w64 automatically."
+            Write-Host "    Please install Scoop first: https://scoop.sh" -ForegroundColor DarkGray
+            exit 1
+        }
+        Update-SessionPath
+    }
+
+    # ── Clone & build ─────────────────────────────────────────────────────────
     $TMP = "$env:TEMP\nexus-build"
+    if (Test-Path $TMP) { Remove-Item $TMP -Recurse -Force }
+
     Write-Step "Cloning nexus-tui..."
     git clone "https://github.com/$REPO.git" $TMP
+
     Push-Location $TMP
     Write-Step "Compiling... (this takes about a minute)"
     cargo build --release
+
+    if (-not (Test-Path "target\release\nexus.exe")) {
+        Pop-Location
+        Write-Warn "Build failed — nexus.exe was not produced."
+        exit 1
+    }
+
     New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
     Copy-Item "target\release\nexus.exe" "$INSTALL_DIR\nexus.exe"
     Pop-Location
