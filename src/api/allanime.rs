@@ -141,11 +141,48 @@ pub async fn search_allanime(query: &str, mode: &str) -> Result<Vec<AllAnimeItem
     let resp: GqlResponse = serde_json::from_str(&text)
         .map_err(|e| anyhow!("AllAnime parse error: {e}"))?;
 
-    let items = resp.data
+    let mut items: Vec<AllAnimeItem> = resp.data
         .map(|d| d.shows.edges.into_iter().map(AllAnimeItem::from).collect())
         .unwrap_or_default();
 
+    rank_allanime(&mut items, query);
+
     Ok(items)
+}
+
+// ── Ranking ───────────────────────────────────────────────────────────────────
+
+/// Re-rank AllAnime results using:
+///   title_match_bonus  (exact > prefix > contains > none)
+/// + score × log2(total_episodes + 2)
+///
+/// Episode count is a popularity proxy — long-running, well-rated series rank
+/// above obscure shorts with the same title fragment.
+fn rank_allanime(items: &mut Vec<AllAnimeItem>, query: &str) {
+    let q = query.to_lowercase();
+    items.sort_by(|a, b| {
+        score_allanime(b, &q)
+            .partial_cmp(&score_allanime(a, &q))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+fn score_allanime(item: &AllAnimeItem, q: &str) -> f32 {
+    let name = item.name.to_lowercase();
+    let eng  = item.english_name.as_deref().unwrap_or("").to_lowercase();
+
+    let title_bonus = |t: &str| -> f32 {
+        if t == q              { 300.0 }
+        else if t.starts_with(q) { 150.0 }
+        else if t.contains(q)    {  50.0 }
+        else                     {   0.0 }
+    };
+    let tb = title_bonus(&name).max(title_bonus(&eng));
+
+    let score = item.score.unwrap_or(0.0);
+    let eps   = item.total_episodes() as f32;
+
+    tb + score * (eps + 2.0).log2()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
