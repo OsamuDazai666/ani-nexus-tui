@@ -173,7 +173,7 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(&app.status, Style::default().fg(C_DIM)),
         Span::styled(more_hint, Style::default().fg(Color::Rgb(55, 55, 55))),
         Span::styled(
-            "    [/] search  [jk] nav  [l] detail  [p] play  [r] recs  [q] quit",
+            "    [/] search  [jk] nav  [l→] detail  [Tab] recs  [Ctrl+↑↓] panes  [p] play  [q] quit",
             Style::default().fg(Color::Rgb(40, 40, 40)),
         ),
     ]);

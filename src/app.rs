@@ -111,8 +111,9 @@ pub struct App {
     pub episode_cursor: usize,
     pub stream_mode:    String,   // "sub" | "dub"
     pub stream_quality: String,   // "best" | "1080" | "720" | "480"
-    pub episode_list:   Vec<String>,
-    pub episode_list_idx: usize,
+    pub episode_list:       Vec<String>,
+    pub episode_list_idx:   usize,
+    pub episode_cols:       usize,   // synced from UI each frame for 2-D grid nav
 
     // Async
     pub msg_tx: mpsc::UnboundedSender<AppMsg>,
@@ -162,6 +163,7 @@ impl App {
             stream_quality:   "best".to_string(),
             episode_list:     Vec::new(),
             episode_list_idx: 0,
+            episode_cols:     8,
             msg_tx: tx,
             msg_rx: Arc::new(Mutex::new(rx)),
             db,
@@ -276,13 +278,95 @@ impl App {
 
     /// Returns true → quit
     pub async fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // Global: q quits (not while typing)
-        if key.code == KeyCode::Char('q') && self.focus != Focus::Search {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Global: Ctrl+C always quits
+        if ctrl && key.code == KeyCode::Char('c') {
             return Ok(true);
         }
-        // Global: Ctrl+C always quits
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+
+        // Global: q quits — but NOT while in Search or EpisodePrompt (q has local meaning there)
+        if key.code == KeyCode::Char('q')
+            && self.focus != Focus::Search
+            && self.focus != Focus::EpisodePrompt
+        {
             return Ok(true);
+        }
+
+        // Global: '/' jumps to search bar from anywhere except Search itself
+        if key.code == KeyCode::Char('/') && self.focus != Focus::Search {
+            self.focus = Focus::Search;
+            self.search_cursor = self.search_input.len();
+            return Ok(false);
+        }
+
+        // Global: Ctrl+Arrow — 2D pane navigation, works from every focus state
+        //
+        // Layout map:
+        //   [Search                    ]   ↑ row 0
+        //   [Results | Detail/Meta/Synopsis]   row 1
+        //   [Results | EpisodePrompt   ]   ↓ row 2
+        //
+        //   Ctrl+↑ / Ctrl+↓  move vertically between rows
+        //   Ctrl+→ / Ctrl+←  move horizontally between columns
+        if ctrl {
+            match key.code {
+                KeyCode::Up => {
+                    self.focus = match &self.focus {
+                        // row 2 → row 1
+                        Focus::EpisodePrompt   => Focus::Detail,
+                        // row 1 → row 0
+                        Focus::Results         => Focus::Search,
+                        Focus::Detail          => Focus::Search,
+                        Focus::Recommendations => Focus::Search,
+                        // already at top / special panes — stay
+                        Focus::Search   => Focus::Search,
+                        Focus::History  => Focus::History,
+                    };
+                    return Ok(false);
+                }
+                KeyCode::Down => {
+                    self.focus = match &self.focus {
+                        // row 0 → row 1
+                        Focus::Search   => { if !self.results.is_empty() { Focus::Results } else { Focus::Search } }
+                        // row 1 → row 2
+                        Focus::Results         => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Results } }
+                        Focus::Detail          => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Detail } }
+                        Focus::Recommendations => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Recommendations } }
+                        // already at bottom / special panes — stay
+                        Focus::EpisodePrompt => Focus::EpisodePrompt,
+                        Focus::History       => Focus::History,
+                    };
+                    return Ok(false);
+                }
+                KeyCode::Right => {
+                    self.focus = match &self.focus {
+                        // column left → column right
+                        Focus::Results => { if self.selected.is_some() { Focus::Detail } else { Focus::Results } }
+                        // already on right column or special — stay
+                        Focus::Detail          => Focus::Detail,
+                        Focus::Recommendations => Focus::Recommendations,
+                        Focus::EpisodePrompt   => Focus::EpisodePrompt,
+                        Focus::Search          => Focus::Search,
+                        Focus::History         => Focus::History,
+                    };
+                    return Ok(false);
+                }
+                KeyCode::Left => {
+                    self.focus = match &self.focus {
+                        // column right → column left
+                        Focus::Detail          => Focus::Results,
+                        Focus::Recommendations => Focus::Results,
+                        Focus::EpisodePrompt   => Focus::Results,
+                        // already on left column or special — stay
+                        Focus::Results  => Focus::Results,
+                        Focus::Search   => Focus::Search,
+                        Focus::History  => Focus::History,
+                    };
+                    return Ok(false);
+                }
+                _ => {}
+            }
         }
 
         // Tab switching — F1..F5
@@ -301,7 +385,7 @@ impl App {
             Focus::Detail          => self.key_detail(key).await?,
             Focus::History         => self.key_history(key).await?,
             Focus::EpisodePrompt   => self.key_episode_prompt(key).await?,
-            _ => Default::default(),
+            Focus::Recommendations => self.key_recommendations(key).await?,
         }
         Ok(false)
     }
@@ -369,7 +453,7 @@ impl App {
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 self.focus = Focus::Detail;
             }
-            KeyCode::Char('/') | KeyCode::Tab => { self.focus = Focus::Search; }
+            KeyCode::Tab => { self.focus = Focus::Search; }
             KeyCode::Char('p') => { self.resolve_and_play().await; }
 
             // Ctrl+N → load next page
@@ -396,6 +480,11 @@ impl App {
             KeyCode::PageUp   => { self.detail_scroll = self.detail_scroll.saturating_sub(10); }
             KeyCode::PageDown => { self.detail_scroll += 10; }
             KeyCode::Char('p') => { self.resolve_and_play().await; }
+            KeyCode::Tab => {
+                if !self.recommendations.is_empty() {
+                    self.focus = Focus::Recommendations;
+                }
+            }
             KeyCode::Left | KeyCode::Esc => { self.focus = Focus::Results; }
             _ => {}
         }
@@ -436,6 +525,26 @@ impl App {
     }
 
     // ── Navigation helpers ────────────────────────────────────────────────────
+
+    async fn key_recommendations(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Left  | KeyCode::Char('h') => {
+                if self.recs_idx > 0 { self.recs_idx -= 1; }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.recs_idx + 1 < self.recommendations.len() { self.recs_idx += 1; }
+            }
+            KeyCode::Enter => {
+                if let Some(item) = self.recommendations.get(self.recs_idx).cloned() {
+                    self.load_detail(item);
+                    self.focus = Focus::Detail;
+                }
+            }
+            KeyCode::Esc | KeyCode::Tab => { self.focus = Focus::Detail; }
+            _ => {}
+        }
+        Ok(())
+    }
 
     fn results_up(&mut self) {
         if self.results_idx > 0 {
@@ -642,19 +751,37 @@ impl App {
     }
 
     async fn key_episode_prompt(&mut self, key: KeyEvent) -> Result<()> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let cols  = self.episode_cols.max(1);
+
         match key.code {
-            KeyCode::Up   | KeyCode::Char('k') => {
-                if self.episode_list_idx > 0 { self.episode_list_idx -= 1; }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.episode_list_idx = self.episode_list_idx.saturating_sub(cols);
                 if let Some(ep) = self.episode_list.get(self.episode_list_idx) {
                     self.episode_input = ep.clone();
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.episode_list_idx + 1 < self.episode_list.len() {
-                    self.episode_list_idx += 1;
-                }
+                let next = (self.episode_list_idx + cols).min(self.episode_list.len().saturating_sub(1));
+                self.episode_list_idx = next;
                 if let Some(ep) = self.episode_list.get(self.episode_list_idx) {
                     self.episode_input = ep.clone();
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if self.episode_list_idx > 0 {
+                    self.episode_list_idx -= 1;
+                    if let Some(ep) = self.episode_list.get(self.episode_list_idx) {
+                        self.episode_input = ep.clone();
+                    }
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.episode_list_idx + 1 < self.episode_list.len() {
+                    self.episode_list_idx += 1;
+                    if let Some(ep) = self.episode_list.get(self.episode_list_idx) {
+                        self.episode_input = ep.clone();
+                    }
                 }
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -675,8 +802,8 @@ impl App {
                     "sub".to_string()
                 };
             }
-            // Cycle quality with q
-            KeyCode::Char('q') => {
+            // Cycle quality with Ctrl+Q (was bare 'q' — conflicted with global quit)
+            KeyCode::Char('q') if ctrl => {
                 self.stream_quality = match self.stream_quality.as_str() {
                     "best" => "1080".to_string(),
                     "1080" => "720".to_string(),

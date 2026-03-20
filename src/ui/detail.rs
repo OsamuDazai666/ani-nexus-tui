@@ -133,7 +133,7 @@ pub fn draw_synopsis(f: &mut Frame, app: &App, area: Rect) {
 
 // ── Episode Grid (Inline) ──────────────────────────────────────────────────────
 
-pub fn draw_episode_grid(f: &mut Frame, app: &App, area: Rect) {
+pub fn draw_episode_grid(f: &mut Frame, app: &mut App, area: Rect) {
     use crate::app::Focus;
     let focused = app.focus == Focus::EpisodePrompt;
 
@@ -170,6 +170,8 @@ pub fn draw_episode_grid(f: &mut Frame, app: &App, area: Rect) {
     // Episode grid
     let cols_per_row = ((rows[1].width as usize).saturating_sub(2)) / 8;
     let cols_per_row = cols_per_row.max(4);
+    // Sync to app so the key handler uses the exact same column count as the rendered grid
+    app.episode_cols = cols_per_row;
 
     let watched: std::collections::HashSet<String> = app.history.iter()
         .filter(|e| app.selected.as_ref().map(|s| s.id() == e.id).unwrap_or(false))
@@ -218,7 +220,7 @@ pub fn draw_episode_grid(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" [↵] PLAY", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled("   [jk/↑↓] nav   [TAB] sub/dub   [Q] quality   [ESC] detail", Style::default().fg(Color::Rgb(50,50,50))),
+                Span::styled("   [hl/←→] col   [jk/↑↓] row   [TAB] sub/dub   [Ctrl+Q] quality   [ESC] detail", Style::default().fg(Color::Rgb(50,50,50))),
             ])).style(Style::default().bg(C_PANEL)),
             rows[2],
         );
