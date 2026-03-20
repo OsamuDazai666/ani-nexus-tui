@@ -1,9 +1,9 @@
 # ◈ nexus-tui
 
-A blazing-fast terminal UI for **Anime**, **Movies**, **TV** and **Manga** — 
+A blazing-fast terminal UI for **Anime**, **Movies**, **TV** and **Manga** 
 website-quality browsing, zero browser required.
 
-```
+<!-- ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  ◈ NEXUS  Anime[F1]│Movies[F2]│TV[F3]│Manga[F4]│History[F5]    │
 ├─────────────────┬──────────────────────────────────────────────  │
@@ -20,47 +20,63 @@ website-quality browsing, zero browser required.
 │  Ep 12/26 ████  │  ▶ Trigun  ★8.4  1998                        │
 └─────────────────┴──────────────────────────────────────────────  │
 │  [/] search  [j/k] navigate  [↵] select  [p] play  [q] quit     │
-└──────────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────────┘ 
+``` -->
+
+
+![nexus-tui demo](assets/nexus-demo.gif)
+
+---
+
+## Install
+
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.sh | bash
 ```
 
-## Setup
+The script will:
+- Install Kitty terminal (optional, for best image quality)
+- Install `mpv` and `yt-dlp`
+- Install Rust if not present
+- Build nexus-tui from source (~1 min)
+- Add `nexus` to your PATH
 
-### 1. Install Rust
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+### Windows
+
+Open PowerShell and run:
+
+```powershell
+irm https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.ps1 | iex
 ```
 
-### 2. Install mpv
+The script will:
+- Install Scoop if not present
+- Install `mpv` and `yt-dlp`
+- Install Rust (GNU toolchain — no Visual Studio required)
+- Build nexus-tui from source (~1 min)
+- Add `nexus` to your PATH
+
+### TMDB API Key (Movies & TV only)
+
+Anime and Manga work out of the box. For Movies & TV you need a free TMDB key:
+
+1. Sign up at [themoviedb.org](https://www.themoviedb.org/settings/api)
+2. Copy your API key
+3. The installer will prompt you for it, or set it manually:
+
 ```bash
-# Arch / Manjaro
-sudo pacman -S mpv
-
-# Ubuntu / Debian
-sudo apt install mpv
-
-# macOS
-brew install mpv
-```
-
-### 3. Get a TMDB API key (free)
-1. Go to https://www.themoviedb.org/settings/api
-2. Create a free account and request an API key
-3. Export it:
-```bash
+# Linux / macOS — add to ~/.bashrc or ~/.zshrc
 export TMDB_API_KEY="your_key_here"
-# Or add to ~/.bashrc / ~/.zshrc
 ```
 
-> AniList and MangaDex are completely free — no key needed.
-
-### 4. Build & Run
-```bash
-git clone <repo>
-cd nexus-tui
-cargo run --release
-# or after install:
-nexus
+```powershell
+# Windows
+[System.Environment]::SetEnvironmentVariable("TMDB_API_KEY", "your_key_here", "User")
 ```
+
+---
 
 ## Keybindings
 
@@ -72,21 +88,24 @@ nexus
 | `j` / `k` or `↑↓` | Navigate list |
 | `l` or `→` | Move focus to detail panel |
 | `h` or `←` | Move focus back to results |
-| `r` | Focus recommendations |
 | `p` | Play in mpv |
 | `d` | Delete from history (History tab) |
 | `q` | Quit |
 | `Ctrl+C` | Force quit |
 
+---
+
 ## Image Rendering
 
-nexus-tui auto-detects the best image protocol:
+nexus-tui auto-detects the best image protocol for your terminal:
 
 | Protocol | Terminal | Quality |
 |----------|----------|---------|
 | Kitty | Kitty, WezTerm | ★★★★★ |
 | Sixel | xterm, foot, mlterm | ★★★★☆ |
 | Half-blocks | All terminals | ★★★☆☆ |
+
+---
 
 ## Content Sources
 
@@ -95,6 +114,8 @@ nexus-tui auto-detects the best image protocol:
 | AniList (GraphQL) | Anime | None |
 | TMDB | Movies & TV | API key |
 | MangaDex | Manga | None |
+
+---
 
 ## Project Structure
 
