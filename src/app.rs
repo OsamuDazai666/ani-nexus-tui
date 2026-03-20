@@ -84,9 +84,8 @@ pub struct App {
     pub search_input:  String,
     pub search_cursor: usize,
     pub is_searching:  bool,
-    pub last_key:      Option<Instant>,   // debounce timer
-    pub search_gen:    u64,               // generation counter — drop stale results
-    pub current_page:  u32,              // for pagination
+    pub search_gen:    u64,   // generation counter — drop stale results
+    pub current_page:  u32,  // for pagination
 
     // Results
     pub results:     Vec<ContentItem>,
@@ -160,7 +159,6 @@ impl App {
             search_input:  String::new(),
             search_cursor: 0,
             is_searching:  false,
-            last_key:      None,
             search_gen:    0,
             current_page:  1,
             results:       Vec::new(),
@@ -183,7 +181,7 @@ impl App {
             db,
             spinner:  Spinner::new(),
             toasts:   Vec::new(),
-            status:   "Type to search  •  F1-F5 switch tabs".to_string(),
+            status:   "Type to search  •  press Enter".to_string(),
             image_protocol: protocol,
             image_picker,
             cover_protocol: None,
@@ -200,17 +198,6 @@ impl App {
     pub async fn tick(&mut self) -> Result<()> {
         if self.is_searching { self.spinner.tick(); }
         self.toasts.retain(|t| t.alive());
-
-        // Debounce: fire search 350ms after last keystroke
-        if let Some(t) = self.last_key {
-            if t.elapsed() >= Duration::from_millis(600)
-                && !self.search_input.trim().is_empty()
-                && self.focus == Focus::Search
-            {
-                self.last_key = None;
-                self.do_search(1).await;
-            }
-        }
 
         // Drain messages
         let msgs: Vec<AppMsg> = {
@@ -237,17 +224,28 @@ impl App {
                     self.status = "No results".into();
                 } else {
                     self.status = format!("{} results", self.results.len());
-                    if self.last_key.is_none() { self.focus = Focus::Results; }
+                    self.focus = Focus::Results;
                     let first = self.results[0].clone();
                     self.load_detail(first);
+
+                    // Prefetch episode lists for ALL results — they're small and cheap
+                    self.prefetch_episode_lists(0, self.results.len());
+
+                    // Prefetch cover images for first 5 results
+                    self.prefetch_images(0, 5);
                 }
             }
             AppMsg::MoreResults(items) => {
                 self.is_searching = false;
                 self.has_more = items.len() >= 25;
                 let added = items.len();
+                let prev_len = self.results.len();
                 self.results.extend(items);
                 self.status = format!("{} results  (+{added} more)", self.results.len());
+
+                // Prefetch episode lists and images for the newly arrived page
+                self.prefetch_episode_lists(prev_len, self.results.len());
+                self.prefetch_images(prev_len, (prev_len + 5).min(self.results.len()));
             }
             AppMsg::DetailLoaded(item) => { self.selected = Some(item); self.detail_scroll = 0; }
 
@@ -333,6 +331,62 @@ impl App {
             if let Some(evict) = self.detail_cache_order.pop_front() {
                 self.detail_cache.remove(&evict);
             }
+        }
+    }
+
+    /// Prefetch cover images for results[start..end] that aren't already cached.
+    fn prefetch_images(&self, start: usize, end: usize) {
+        for item in self.results.get(start..end).unwrap_or(&[]) {
+            let Some(url) = item.cover_url().map(String::from) else { continue };
+            if self.image_cache.contains_key(&url) { continue; }
+
+            let tx = self.msg_tx.clone();
+            let url_clone = url.clone();
+            tokio::spawn(async move {
+                let client = reqwest::Client::builder()
+                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+                    .timeout(Duration::from_secs(15))
+                    .connect_timeout(Duration::from_secs(8))
+                    .build().unwrap_or_default();
+                for attempt in 0..2u8 {
+                    match client.get(&url_clone).header("Accept", "image/*").send().await {
+                        Ok(r) if r.status().is_success() => {
+                            match r.bytes().await {
+                                Ok(b) => {
+                                    let _ = tx.send(AppMsg::ImageFetched {
+                                        url: url_clone,
+                                        bytes: b.to_vec(),
+                                    });
+                                    return;
+                                }
+                                Err(_) if attempt == 0 => continue,
+                                Err(_) => return,
+                            }
+                        }
+                        Ok(_) if attempt == 0 => continue,
+                        _ => return,
+                    }
+                }
+            });
+        }
+    }
+
+    /// Prefetch episode lists for results[start..end] that aren't already cached.
+    fn prefetch_episode_lists(&self, start: usize, end: usize) {
+        let mode = self.stream_mode.clone();
+        for item in self.results.get(start..end).unwrap_or(&[]) {
+            let ContentItem::Anime(a) = item else { continue };
+            let id = a.id.clone();
+            if self.detail_cache.get(&id).and_then(|c| c.episode_list.as_ref()).is_some() {
+                continue; // already cached
+            }
+            let tx  = self.msg_tx.clone();
+            let mode = mode.clone();
+            tokio::spawn(async move {
+                if let Ok(eps) = player::fetch_episode_list(&id, &mode).await {
+                    let _ = tx.send(AppMsg::EpisodeList { id, eps });
+                }
+            });
         }
     }
 
@@ -439,19 +493,16 @@ impl App {
             KeyCode::Char(c) => {
                 self.search_input.insert(self.search_cursor, c);
                 self.search_cursor += 1;
-                self.last_key = Some(Instant::now());
             }
             KeyCode::Backspace => {
                 if self.search_cursor > 0 {
                     self.search_cursor -= 1;
                     self.search_input.remove(self.search_cursor);
-                    self.last_key = Some(Instant::now());
                 }
             }
             KeyCode::Delete => {
                 if self.search_cursor < self.search_input.len() {
                     self.search_input.remove(self.search_cursor);
-                    self.last_key = Some(Instant::now());
                 }
             }
             KeyCode::Left  => { if self.search_cursor > 0 { self.search_cursor -= 1; } }
@@ -459,12 +510,21 @@ impl App {
             KeyCode::Home  => { self.search_cursor = 0; }
             KeyCode::End   => { self.search_cursor = self.search_input.len(); }
             KeyCode::Enter => {
-                self.last_key = None;
-                if !self.search_input.trim().is_empty() {
+                let query = self.search_input.trim().to_string();
+                if query.is_empty() {
+                    // Empty input — clear results
+                    self.results.clear();
+                    self.selected = None;
+                    self.cover_image = None;
+                    self.cover_protocol = None;
+                    self.episode_list.clear();
+                    self.status = "Type to search  •  press Enter".to_string();
+                } else {
                     self.do_search(1).await;
                 }
             }
-            KeyCode::Esc | KeyCode::Tab | KeyCode::Down => {
+            // ↓ / Tab / Esc — move to results if they exist, otherwise stay
+            KeyCode::Down | KeyCode::Tab | KeyCode::Esc => {
                 if !self.results.is_empty() { self.focus = Focus::Results; }
             }
             _ => {}
@@ -578,8 +638,19 @@ impl App {
             self.results_idx += 1;
             let item = self.results[self.results_idx].clone();
             self.load_detail(item);
+
+            // Prefetch images 2-3 positions ahead of current
+            let ahead_start = self.results_idx + 1;
+            let ahead_end   = (self.results_idx + 3).min(self.results.len());
+            if ahead_start < ahead_end {
+                self.prefetch_images(ahead_start, ahead_end);
+            }
+
+            // Speculatively fetch page 2 when user reaches result #15
+            if self.results_idx == 14 && self.has_more && !self.is_searching {
+                self.load_next_page().await;
+            }
         } else if self.has_more && !self.is_searching {
-            // Auto-load more when reaching the end
             self.load_next_page().await;
         }
     }
@@ -595,7 +666,6 @@ impl App {
         self.episode_list.clear();
         self.search_input.clear();
         self.search_cursor = 0;
-        self.last_key    = None;
         self.current_page = 1;
         self.has_more    = false;
         self.focus = if tab == Tab::History { Focus::History } else { Focus::Search };
