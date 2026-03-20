@@ -1,5 +1,5 @@
 use crate::{
-    api::{allanime, mangadex, tmdb, ContentItem},
+    api::{allanime, ContentItem},
     db::history::{HistoryEntry, HistoryStore},
     player,
 };
@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, Mutex};
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, strum::Display, strum::EnumIter)]
-pub enum Tab { Anime, Movies, TV, Manga, History }
+pub enum Tab { Anime, History }
 
 // ── Focus ─────────────────────────────────────────────────────────────────────
 
@@ -420,10 +420,7 @@ impl App {
         // Tab switching — F1..F5
         match key.code {
             KeyCode::F(1) => { self.switch_tab(Tab::Anime);   return Ok(false); }
-            KeyCode::F(2) => { self.switch_tab(Tab::Movies);  return Ok(false); }
-            KeyCode::F(3) => { self.switch_tab(Tab::TV);      return Ok(false); }
-            KeyCode::F(4) => { self.switch_tab(Tab::Manga);   return Ok(false); }
-            KeyCode::F(5) => { self.switch_tab(Tab::History); return Ok(false); }
+            KeyCode::F(2) => { self.switch_tab(Tab::History); return Ok(false); }
             _ => {}
         }
 
@@ -632,14 +629,8 @@ impl App {
 
         tokio::spawn(async move {
             let res: anyhow::Result<Vec<ContentItem>> = match tab {
-                Tab::Anime  => allanime::search_allanime(&query, &mode).await
-                                   .map(|v| v.into_iter().map(ContentItem::Anime).collect()),
-                Tab::Movies => tmdb::search_movies(&query).await
-                                   .map(|v| v.into_iter().map(ContentItem::Movie).collect()),
-                Tab::TV     => tmdb::search_tv(&query).await
-                                   .map(|v| v.into_iter().map(ContentItem::TV).collect()),
-                Tab::Manga  => mangadex::search_manga(&query).await
-                                   .map(|v| v.into_iter().map(ContentItem::Manga).collect()),
+                Tab::Anime   => allanime::search_allanime(&query, &mode).await
+                                    .map(|v| v.into_iter().map(ContentItem::Anime).collect()),
                 Tab::History => Ok(vec![]),
             };
             match res {
@@ -740,38 +731,13 @@ impl App {
     // ── Playback ──────────────────────────────────────────────────────────────
 
     pub async fn resolve_and_play(&mut self) {
-        let Some(item) = self.selected.clone() else {
+        if self.selected.is_none() {
             self.toast_info("Select something first");
             return;
-        };
-        // For anime, show episode prompt
-        if matches!(item, ContentItem::Anime(_)) {
-            self.episode_input = String::from("1");
-            self.episode_cursor = 1;
-            self.focus = Focus::EpisodePrompt;
-            return;
         }
-        self.do_play(item).await;
-    }
-
-    pub async fn do_play(&mut self, item: ContentItem) {
-        self.toast_info("Resolving stream…");
-        self.is_searching = true;
-        self.status = "Resolving stream…".to_string();
-        
-        let tx = self.msg_tx.clone();
-        let db = self.db.clone();
-        tokio::spawn(async move {
-            match player::resolve_stream(&item).await {
-                Ok(url) => {
-                    let mut entry = HistoryEntry::from_content(&item);
-                    entry.stream_url = Some(url.clone());
-                    let _ = db.save(&entry);
-                    let _ = tx.send(AppMsg::StreamUrl(url));
-                }
-                Err(e) => { let _ = tx.send(AppMsg::Error(format!("Stream: {e}"))); }
-            }
-        });
+        self.episode_input = String::from("1");
+        self.episode_cursor = 1;
+        self.focus = Focus::EpisodePrompt;
     }
 
     async fn key_episode_prompt(&mut self, key: KeyEvent) -> Result<()> {

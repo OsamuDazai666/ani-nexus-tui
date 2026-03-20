@@ -88,9 +88,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         let active = t == app.active_tab;
         let label = match t {
             Tab::Anime   => " ANIME ",
-            Tab::Movies  => " MOVIES ",
-            Tab::TV      => " TV ",
-            Tab::Manga   => " MANGA ",
             Tab::History => " HISTORY ",
         };
         if active {
@@ -225,7 +222,7 @@ fn draw_toasts(f: &mut Frame, app: &App, area: Rect) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub fn tab_idx(tab: &Tab) -> usize {
-    match tab { Tab::Anime=>0, Tab::Movies=>1, Tab::TV=>2, Tab::Manga=>3, Tab::History=>4 }
+    match tab { Tab::Anime => 0, Tab::History => 1 }
 }
 
 pub fn focused_block<'a>(title: &'a str, focused: bool) -> Block<'a> {

@@ -9,9 +9,6 @@ use std::path::PathBuf;
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
-    pub tmdb_api_key: Option<String>,
-
-    #[serde(default)]
     pub player: PlayerConfig,
 
     #[serde(default)]
@@ -20,9 +17,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 pub struct PlayerConfig {
-    /// Path to mpv binary (defaults to "mpv" on PATH)
     pub mpv_path: String,
-    /// Extra mpv flags
     pub extra_args: Vec<String>,
 }
 
@@ -37,9 +32,7 @@ impl Default for PlayerConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct UiConfig {
-    /// Override image protocol: "kitty" | "sixel" | "halfblock" | "auto"
     pub image_protocol: String,
-    /// Number of results to show
     pub results_limit: usize,
 }
 
@@ -66,17 +59,10 @@ impl Config {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(&path)?;
-        let mut cfg: Config = toml::from_str(&content)?;
-
-        // Env var takes precedence over config file
-        if let Ok(key) = std::env::var("TMDB_API_KEY") {
-            cfg.tmdb_api_key = Some(key);
-        }
-
+        let cfg: Config = toml::from_str(&content)?;
         Ok(cfg)
     }
 
-    /// Write a sample config if none exists
     pub fn write_sample() -> Result<()> {
         let path = config_path();
         if path.exists() {
@@ -88,10 +74,6 @@ impl Config {
         std::fs::write(
             &path,
             r#"# nexus-tui configuration
-# Full docs: https://github.com/you/nexus-tui
-
-# TMDB API key (free at https://www.themoviedb.org/settings/api)
-# tmdb_api_key = "your_key_here"
 
 [player]
 mpv_path   = "mpv"

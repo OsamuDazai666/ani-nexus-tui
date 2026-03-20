@@ -23,9 +23,6 @@ impl HistoryEntry {
                 let eps = a.total_episodes();
                 if eps > 0 { Some(eps) } else { None }
             }
-            ContentItem::TV(t)    => t.seasons,
-            ContentItem::Manga(m) => m.chapters,
-            ContentItem::Movie(_) => None,
         };
         Self {
             id:           item.id().to_string(),

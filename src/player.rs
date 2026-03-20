@@ -2,7 +2,6 @@
 //! Exact port of ani-cli v4.10 source (pystardust/ani-cli).
 
 use anyhow::{anyhow, bail, Result};
-use crate::api::ContentItem;
 use std::process::{Command, Stdio};
 
 const ALLANIME_API:  &str = "https://api.allanime.day/api";
@@ -39,30 +38,7 @@ fn hex_decipher(s: &str) -> String {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-pub async fn resolve_stream(item: &ContentItem) -> Result<String> {
-    match item {
-        ContentItem::Movie(m) | ContentItem::TV(m) => {
-            let kind = match item { ContentItem::TV(_) => "tv", _ => "movie" };
-            match tmdb_trailer(&m.id, kind).await {
-                Ok(url) => Ok(url),
-                Err(_) => {
-                    let page = format!("https://www.themoviedb.org/{kind}/{}", m.id);
-                    open_browser(&page)?;
-                    Err(anyhow!("No trailer found — opened TMDB page in browser"))
-                }
-            }
-        }
-        ContentItem::Manga(m) => {
-            let url = format!("https://mangadex.org/title/{}", m.id);
-            open_browser(&url)?;
-            Ok(url)
-        }
-        ContentItem::Anime(_) => Err(anyhow!("Use stream_anime() for anime")),
-    }
-}
-
 /// Main entry for anime. Returns the resolved direct stream URL.
-/// Takes the AllAnime show ID directly — no more title-based searching.
 pub async fn stream_anime(show_id: &str, episode: u32, mode: &str, quality: &str) -> Result<String> {
     let (episode_url, _refr_flag) = get_episode_url(show_id, episode, mode, quality).await?;
     Ok(episode_url)
@@ -106,14 +82,6 @@ pub fn launch_mpv_url(url: &str) -> Result<()> {
     status.map_err(|e| anyhow!(
         "Failed to launch mpv: {e}\nInstall: sudo apt install mpv"
     ))?;
-    Ok(())
-}
-
-pub fn open_browser(url: &str) -> Result<()> {
-    Command::new("xdg-open").arg(url)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow!("Browser open failed: {e}"))?;
     Ok(())
 }
 
@@ -424,20 +392,6 @@ fn expand_wixmp(url: &str) -> Vec<(String, String, Option<String>)> {
         }
     }
     vec![]
-}
-
-// ── TMDB trailer ──────────────────────────────────────────────────────────────
-
-async fn tmdb_trailer(id: &str, kind: &str) -> Result<String> {
-    let key = std::env::var("TMDB_API_KEY").map_err(|_| anyhow!("TMDB_API_KEY not set"))?;
-    let url = format!("https://api.themoviedb.org/3/{kind}/{id}/videos?api_key={key}&language=en-US");
-    let resp: serde_json::Value = reqwest::get(&url).await?.json().await?;
-    let results = resp["results"].as_array().ok_or_else(|| anyhow!("no results"))?;
-    let v = results.iter()
-        .find(|v| v["type"] == "Trailer" && v["site"] == "YouTube" && v["official"] == true)
-        .or_else(|| results.iter().find(|v| v["site"] == "YouTube"))
-        .ok_or_else(|| anyhow!("no youtube video"))?;
-    Ok(format!("https://www.youtube.com/watch?v={}", v["key"].as_str().unwrap_or("")))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
