@@ -1,5 +1,4 @@
 pub mod allanime;
-pub mod anilist;
 pub mod mangadex;
 pub mod tmdb;
 

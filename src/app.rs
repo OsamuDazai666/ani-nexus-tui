@@ -17,7 +17,7 @@ pub enum Tab { Anime, Movies, TV, Manga, History }
 // ── Focus ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Focus { Search, Results, Detail, Recommendations, History, EpisodePrompt }
+pub enum Focus { Search, Results, Detail, History, EpisodePrompt }
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
 
@@ -66,10 +66,10 @@ pub enum AppMsg {
     SearchResults { items: Vec<ContentItem>, gen: u64 },
     MoreResults(Vec<ContentItem>),
     DetailLoaded(ContentItem),
+    ImageFetched { url: String, bytes: Vec<u8> },
     ImageLoaded(Vec<u8>),
-    RecsLoaded(Vec<ContentItem>),
     StreamUrl(String),
-    EpisodeList(Vec<String>),
+    EpisodeList { id: String, eps: Vec<String> },
     Error(String),
 }
 
@@ -98,10 +98,6 @@ pub struct App {
     pub detail_scroll: u16,
     pub cover_image:  Option<Vec<u8>>,
 
-    // Recommendations
-    pub recommendations: Vec<ContentItem>,
-    pub recs_idx:        usize,
-
     // History
     pub history:     Vec<HistoryEntry>,
     pub history_idx: usize,
@@ -129,6 +125,26 @@ pub struct App {
     pub image_picker: ratatui_image::picker::Picker,
     pub cover_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
     pub needs_redraw: bool,
+
+    // ── In-memory caches ──────────────────────────────────────────────────────
+    // Cover images keyed by URL — avoids re-fetching the same image when
+    // scrolling back through results. Capped at IMAGE_CACHE_MAX entries (LRU).
+    pub image_cache:  std::collections::HashMap<String, Vec<u8>>,
+    image_cache_order: std::collections::VecDeque<String>,
+
+    // Detail cache keyed by item ID — stores episode list + recs so revisiting
+    // an already-seen result is instant. Capped at DETAIL_CACHE_MAX entries.
+    pub detail_cache: std::collections::HashMap<String, CachedDetail>,
+    detail_cache_order: std::collections::VecDeque<String>,
+}
+
+const IMAGE_CACHE_MAX:  usize = 30;
+const DETAIL_CACHE_MAX: usize = 50;
+
+/// Everything we pre-fetch when an item is selected, stored so revisiting is free.
+#[derive(Clone)]
+pub struct CachedDetail {
+    pub episode_list: Option<Vec<String>>,
 }
 
 impl App {
@@ -153,8 +169,6 @@ impl App {
             selected:      None,
             detail_scroll: 0,
             cover_image:   None,
-            recommendations: Vec::new(),
-            recs_idx:      0,
             history,
             history_idx:   0,
             episode_input:    String::new(),
@@ -174,6 +188,10 @@ impl App {
             image_picker,
             cover_protocol: None,
             needs_redraw:  false,
+            image_cache:       std::collections::HashMap::new(),
+            image_cache_order: std::collections::VecDeque::new(),
+            detail_cache:       std::collections::HashMap::new(),
+            detail_cache_order: std::collections::VecDeque::new(),
         })
     }
 
@@ -209,7 +227,6 @@ impl App {
     fn handle_msg(&mut self, msg: AppMsg) {
         match msg {
             AppMsg::SearchResults { items, gen } => {
-                // Drop stale results from an earlier search generation
                 if gen != self.search_gen { return; }
                 self.is_searching = false;
                 self.has_more = items.len() >= 25;
@@ -220,7 +237,6 @@ impl App {
                     self.status = "No results".into();
                 } else {
                     self.status = format!("{} results", self.results.len());
-                    // Don't steal focus if user is still typing
                     if self.last_key.is_none() { self.focus = Focus::Results; }
                     let first = self.results[0].clone();
                     self.load_detail(first);
@@ -233,27 +249,31 @@ impl App {
                 self.results.extend(items);
                 self.status = format!("{} results  (+{added} more)", self.results.len());
             }
-            AppMsg::DetailLoaded(item)  => { self.selected = Some(item); self.detail_scroll = 0; }
-            AppMsg::ImageLoaded(bytes)  => {
-                self.cover_protocol = None;
-                // Save raw image to ~/Desktop/nexus-debug/ for analysis
-                if let Ok(home) = std::env::var("HOME") {
-                    let debug_dir = std::path::PathBuf::from(&home).join("Desktop").join("nexus-debug");
-                    let _ = std::fs::create_dir_all(&debug_dir);
-                    let name = self.selected.as_ref()
-                        .map(|s| s.title().replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_"))
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let ext = if bytes.starts_with(b"\x89PNG") { "png" } else { "jpg" };
-                    let path = debug_dir.join(format!("{name}.{ext}"));
-                    let _ = std::fs::write(&path, &bytes);
-                }
-                if let Ok(img) = image::load_from_memory(&bytes) {
-                    let dyn_img = image::DynamicImage::ImageRgba8(img.into_rgba8());
-                    self.cover_protocol = Some(self.image_picker.new_resize_protocol(dyn_img));
-                }
-                self.cover_image = Some(bytes);
+            AppMsg::DetailLoaded(item) => { self.selected = Some(item); self.detail_scroll = 0; }
+
+            // Image fetched from network — store in cache, then render if still selected
+            AppMsg::ImageFetched { url, bytes } => {
+                self.cache_image(url, bytes.clone());
+                self.render_cover(bytes);
             }
-            AppMsg::RecsLoaded(items)   => { self.recommendations = items; self.recs_idx = 0; }
+            // Image served directly from cache (legacy path, kept for compat)
+            AppMsg::ImageLoaded(bytes) => {
+                self.render_cover(bytes);
+            }
+
+            // Episode list fetched — store in detail cache and apply if still selected
+            AppMsg::EpisodeList { id, eps } => {
+                let entry = self.detail_cache.entry(id.clone()).or_insert(CachedDetail {
+                    episode_list: None,
+                });
+                entry.episode_list = Some(eps.clone());
+                self.bump_detail_cache(&id);
+                if self.selected.as_ref().map(|s| s.id() == id).unwrap_or(false) {
+                    self.episode_list = eps;
+                    self.episode_list_idx = 0;
+                }
+            }
+
             AppMsg::StreamUrl(url) => {
                 self.is_searching = false;
                 self.status = "Playing".to_string();
@@ -263,13 +283,55 @@ impl App {
                 }
                 self.needs_redraw = true;
             }
-            AppMsg::EpisodeList(eps) => {
-                self.episode_list = eps;
-                self.episode_list_idx = 0;
-            }
             AppMsg::Error(e) => {
                 self.is_searching = false;
                 self.toast_error(e);
+            }
+        }
+    }
+
+    // ── Cache helpers ─────────────────────────────────────────────────────────
+
+    fn render_cover(&mut self, bytes: Vec<u8>) {
+        self.cover_protocol = None;
+        if let Ok(home) = std::env::var("HOME") {
+            let debug_dir = std::path::PathBuf::from(&home).join("Desktop").join("nexus-debug");
+            let _ = std::fs::create_dir_all(&debug_dir);
+            let name = self.selected.as_ref()
+                .map(|s| s.title().replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_"))
+                .unwrap_or_else(|| "unknown".to_string());
+            let ext = if bytes.starts_with(b"\x89PNG") { "png" } else { "jpg" };
+            let _ = std::fs::write(debug_dir.join(format!("{name}.{ext}")), &bytes);
+        }
+        if let Ok(img) = image::load_from_memory(&bytes) {
+            let dyn_img = image::DynamicImage::ImageRgba8(img.into_rgba8());
+            self.cover_protocol = Some(self.image_picker.new_resize_protocol(dyn_img));
+        }
+        self.cover_image = Some(bytes);
+    }
+
+    fn cache_image(&mut self, url: String, bytes: Vec<u8>) {
+        if self.image_cache.contains_key(&url) {
+            // Refresh LRU position
+            self.image_cache_order.retain(|u| u != &url);
+            self.image_cache_order.push_back(url.clone());
+            return;
+        }
+        if self.image_cache.len() >= IMAGE_CACHE_MAX {
+            if let Some(evict) = self.image_cache_order.pop_front() {
+                self.image_cache.remove(&evict);
+            }
+        }
+        self.image_cache.insert(url.clone(), bytes);
+        self.image_cache_order.push_back(url);
+    }
+
+    fn bump_detail_cache(&mut self, id: &str) {
+        self.detail_cache_order.retain(|i| i != id);
+        self.detail_cache_order.push_back(id.to_string());
+        if self.detail_cache.len() > DETAIL_CACHE_MAX {
+            if let Some(evict) = self.detail_cache_order.pop_front() {
+                self.detail_cache.remove(&evict);
             }
         }
     }
@@ -313,27 +375,19 @@ impl App {
             match key.code {
                 KeyCode::Up => {
                     self.focus = match &self.focus {
-                        // row 2 → row 1
                         Focus::EpisodePrompt   => Focus::Detail,
-                        // row 1 → row 0
                         Focus::Results         => Focus::Search,
                         Focus::Detail          => Focus::Search,
-                        Focus::Recommendations => Focus::Search,
-                        // already at top / special panes — stay
-                        Focus::Search   => Focus::Search,
-                        Focus::History  => Focus::History,
+                        Focus::Search          => Focus::Search,
+                        Focus::History         => Focus::History,
                     };
                     return Ok(false);
                 }
                 KeyCode::Down => {
                     self.focus = match &self.focus {
-                        // row 0 → row 1
                         Focus::Search   => { if !self.results.is_empty() { Focus::Results } else { Focus::Search } }
-                        // row 1 → row 2
-                        Focus::Results         => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Results } }
-                        Focus::Detail          => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Detail } }
-                        Focus::Recommendations => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Recommendations } }
-                        // already at bottom / special panes — stay
+                        Focus::Results  => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Results } }
+                        Focus::Detail   => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Detail } }
                         Focus::EpisodePrompt => Focus::EpisodePrompt,
                         Focus::History       => Focus::History,
                     };
@@ -341,11 +395,8 @@ impl App {
                 }
                 KeyCode::Right => {
                     self.focus = match &self.focus {
-                        // column left → column right
-                        Focus::Results => { if self.selected.is_some() { Focus::Detail } else { Focus::Results } }
-                        // already on right column or special — stay
+                        Focus::Results         => { if self.selected.is_some() { Focus::Detail } else { Focus::Results } }
                         Focus::Detail          => Focus::Detail,
-                        Focus::Recommendations => Focus::Recommendations,
                         Focus::EpisodePrompt   => Focus::EpisodePrompt,
                         Focus::Search          => Focus::Search,
                         Focus::History         => Focus::History,
@@ -354,14 +405,11 @@ impl App {
                 }
                 KeyCode::Left => {
                     self.focus = match &self.focus {
-                        // column right → column left
                         Focus::Detail          => Focus::Results,
-                        Focus::Recommendations => Focus::Results,
                         Focus::EpisodePrompt   => Focus::Results,
-                        // already on left column or special — stay
-                        Focus::Results  => Focus::Results,
-                        Focus::Search   => Focus::Search,
-                        Focus::History  => Focus::History,
+                        Focus::Results         => Focus::Results,
+                        Focus::Search          => Focus::Search,
+                        Focus::History         => Focus::History,
                     };
                     return Ok(false);
                 }
@@ -385,7 +433,6 @@ impl App {
             Focus::Detail          => self.key_detail(key).await?,
             Focus::History         => self.key_history(key).await?,
             Focus::EpisodePrompt   => self.key_episode_prompt(key).await?,
-            Focus::Recommendations => self.key_recommendations(key).await?,
         }
         Ok(false)
     }
@@ -480,11 +527,6 @@ impl App {
             KeyCode::PageUp   => { self.detail_scroll = self.detail_scroll.saturating_sub(10); }
             KeyCode::PageDown => { self.detail_scroll += 10; }
             KeyCode::Char('p') => { self.resolve_and_play().await; }
-            KeyCode::Tab => {
-                if !self.recommendations.is_empty() {
-                    self.focus = Focus::Recommendations;
-                }
-            }
             KeyCode::Left | KeyCode::Esc => { self.focus = Focus::Results; }
             _ => {}
         }
@@ -526,26 +568,6 @@ impl App {
 
     // ── Navigation helpers ────────────────────────────────────────────────────
 
-    async fn key_recommendations(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Left  | KeyCode::Char('h') => {
-                if self.recs_idx > 0 { self.recs_idx -= 1; }
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                if self.recs_idx + 1 < self.recommendations.len() { self.recs_idx += 1; }
-            }
-            KeyCode::Enter => {
-                if let Some(item) = self.recommendations.get(self.recs_idx).cloned() {
-                    self.load_detail(item);
-                    self.focus = Focus::Detail;
-                }
-            }
-            KeyCode::Esc | KeyCode::Tab => { self.focus = Focus::Detail; }
-            _ => {}
-        }
-        Ok(())
-    }
-
     fn results_up(&mut self) {
         if self.results_idx > 0 {
             self.results_idx -= 1;
@@ -573,7 +595,7 @@ impl App {
         self.selected    = None;
         self.cover_image = None;
         self.cover_protocol = None;
-        self.recommendations.clear();
+        self.episode_list.clear();
         self.search_input.clear();
         self.search_cursor = 0;
         self.last_key    = None;
@@ -581,6 +603,7 @@ impl App {
         self.has_more    = false;
         self.focus = if tab == Tab::History { Focus::History } else { Focus::Search };
         self.status = format!("{tab}  •  type to search");
+        // Note: image_cache and detail_cache intentionally kept across tab switches
     }
 
     // ── Search ────────────────────────────────────────────────────────────────
@@ -596,7 +619,6 @@ impl App {
 
         if page == 1 {
             self.results.clear();
-            self.recommendations.clear();
             self.selected    = None;
             self.cover_image = None;
             self.status = format!("Searching \"{query}\"…");
@@ -640,74 +662,76 @@ impl App {
     // ── Detail ────────────────────────────────────────────────────────────────
 
     fn load_detail(&mut self, item: ContentItem) {
-        self.cover_image = None;
-        self.cover_protocol = None;
-        self.recommendations.clear();
+        let item_id = item.id().to_string();
 
-        // Cover art
+        // ── Cover image ───────────────────────────────────────────────────────
+        self.cover_protocol = None;
+        self.cover_image    = None;
+
         if let Some(url) = item.cover_url().map(String::from) {
-            let tx = self.msg_tx.clone();
-            tokio::spawn(async move {
-                let client = reqwest::Client::builder()
-                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-                    .timeout(Duration::from_secs(15))
-                    .connect_timeout(Duration::from_secs(8))
-                    .build().unwrap_or_default();
-                for attempt in 0..2u8 {
-                    match client.get(&url)
-                        .header("Accept", "image/*")
-                        .send().await
-                    {
-                        Ok(r) if r.status().is_success() => {
-                            match r.bytes().await {
-                                Ok(b) => { let _ = tx.send(AppMsg::ImageLoaded(b.to_vec())); return; }
-                                Err(_) if attempt == 0 => continue,
-                                Err(e) => { let _ = tx.send(AppMsg::Error(format!("Image bytes: {e}"))); return; }
+            if let Some(cached) = self.image_cache.get(&url).cloned() {
+                // Cache hit — render immediately, no network call
+                self.render_cover(cached);
+            } else {
+                // Cache miss — fetch and store
+                let tx = self.msg_tx.clone();
+                let url_clone = url.clone();
+                tokio::spawn(async move {
+                    let client = reqwest::Client::builder()
+                        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+                        .timeout(Duration::from_secs(15))
+                        .connect_timeout(Duration::from_secs(8))
+                        .build().unwrap_or_default();
+                    for attempt in 0..2u8 {
+                        match client.get(&url_clone).header("Accept", "image/*").send().await {
+                            Ok(r) if r.status().is_success() => {
+                                match r.bytes().await {
+                                    Ok(b) => {
+                                        let _ = tx.send(AppMsg::ImageFetched {
+                                            url: url_clone,
+                                            bytes: b.to_vec(),
+                                        });
+                                        return;
+                                    }
+                                    Err(_) if attempt == 0 => continue,
+                                    Err(e) => { let _ = tx.send(AppMsg::Error(format!("Image bytes: {e}"))); return; }
+                                }
                             }
+                            Ok(_) if attempt == 0 => continue,
+                            Ok(r) => { let _ = tx.send(AppMsg::Error(format!("Image HTTP {}", r.status()))); return; }
+                            Err(_) if attempt == 0 => {
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                continue;
+                            }
+                            Err(e) => { let _ = tx.send(AppMsg::Error(format!("Image fetch: {e}"))); return; }
                         }
-                        Ok(_) if attempt == 0 => continue,
-                        Ok(r) => { let _ = tx.send(AppMsg::Error(format!("Image HTTP {}", r.status()))); return; }
-                        Err(_) if attempt == 0 => {
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                            continue;
-                        }
-                        Err(e) => { let _ = tx.send(AppMsg::Error(format!("Image fetch: {e}"))); return; }
                     }
-                }
-            });
+                });
+            }
         }
 
-        // Recommendations
-        let tx  = self.msg_tx.clone();
-        let tab = self.active_tab.clone();
-        let id  = item.id().to_string();
-        tokio::spawn(async move {
-            let res: anyhow::Result<Vec<ContentItem>> = match tab {
-                Tab::Anime  => Ok(vec![]), // TODO: AllAnime recommendations
-                Tab::Movies => tmdb::fetch_recommendations(&id, &Tab::Movies).await
-                                   .map(|v| v.into_iter().map(ContentItem::Movie).collect()),
-                Tab::TV     => tmdb::fetch_recommendations(&id, &Tab::TV).await
-                                   .map(|v| v.into_iter().map(ContentItem::TV).collect()),
-                _ => Ok(vec![]),
-            };
-            if let Ok(recs) = res {
-                let _ = tx.send(AppMsg::RecsLoaded(recs));
-            }
-        });
+        // ── Episode list — serve from cache or fetch ──────────────────────────
+        let cached = self.detail_cache.get(&item_id).cloned();
 
-        // Fetch episode list for anime
-        if matches!(item, ContentItem::Anime(_)) {
-            let tx4 = self.msg_tx.clone();
-            let id = match &item {
-                ContentItem::Anime(a) => a.id.clone(),
-                _ => String::new(),
-            };
-            let mode = self.stream_mode.clone();
-            tokio::spawn(async move {
-                if let Ok(eps) = player::fetch_episode_list(&id, &mode).await {
-                    let _ = tx4.send(AppMsg::EpisodeList(eps));
-                }
-            });
+        if let Some(ref c) = cached {
+            if let Some(ref eps) = c.episode_list {
+                self.episode_list = eps.clone();
+                self.episode_list_idx = 0;
+            }
+        } else {
+            self.episode_list.clear();
+
+            // Episode list (Anime only)
+            if matches!(item, ContentItem::Anime(_)) {
+                let tx4  = self.msg_tx.clone();
+                let id4  = item_id.clone();
+                let mode = self.stream_mode.clone();
+                tokio::spawn(async move {
+                    if let Ok(eps) = player::fetch_episode_list(&id4, &mode).await {
+                        let _ = tx4.send(AppMsg::EpisodeList { id: id4, eps });
+                    }
+                });
+            }
         }
 
         let _ = self.msg_tx.send(AppMsg::DetailLoaded(item));
