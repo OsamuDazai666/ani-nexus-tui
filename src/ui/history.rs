@@ -1,169 +1,619 @@
 use crate::app::{App, Focus};
-use crate::ui::{focused_block, trunc, C_ACCENT,
-                C_BORDER_F, C_DIM, C_GREEN, C_PANEL, C_TEXT};
+use crate::ui::{focused_block, trunc, C_ACCENT, C_BG, C_BG3,
+                C_BORDER_F, C_DIM, C_GREEN, C_PANEL, C_TEXT, C_BORDER};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Gauge, Paragraph},
     Frame,
 };
 
-pub fn draw(f: &mut Frame, app: &App, area: Rect) {
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let cols = Layout::horizontal([
-        Constraint::Percentage(36),
-        Constraint::Percentage(64),
+        Constraint::Percentage(38),
+        Constraint::Percentage(62),
     ]).split(area);
+
     draw_list(f, app, cols[0]);
-    draw_entry(f, app, cols[1]);
+    draw_detail(f, app, cols[1]);
 }
+
+// ── Left pane: filter bar + card list ─────────────────────────────────────────
 
 fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::History;
 
-    let items: Vec<ListItem> = app.history.iter().enumerate().map(|(i, e)| {
-        let sel  = i == app.history_idx;
-        let date = e.last_watched.format("%b %d  %H:%M").to_string();
-        let bar  = e.progress_bar(10);
-        let pct  = e.progress_pct()
-            .map(|p| format!(" {:.0}%", p * 100.0))
-            .unwrap_or_default();
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ]).split(area);
 
-        if sel {
-            ListItem::new(vec![
-                Line::from(Span::styled(
-                    format!(" ▶ {:─<24}", trunc(&e.title, 23)),
-                    Style::default().fg(Color::Rgb(0,0,0)).bg(C_ACCENT).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    format!("   {}  {}{} ", e.media_type.to_uppercase(), bar, pct),
-                    Style::default().fg(Color::Rgb(60,60,0)).bg(C_ACCENT),
-                )),
-            ])
-        } else {
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled("  ", Style::default().bg(C_PANEL)),
-                    Span::styled(trunc(&e.title, 24), Style::default().fg(C_TEXT).bg(C_PANEL)),
-                ]),
-                Line::from(vec![
-                    Span::styled(format!("  {}  {}", date, pct), Style::default().fg(C_DIM).bg(C_PANEL)),
-                ]),
-            ])
-        }
-    }).collect();
+    draw_filter_bar(f, app, rows[0], focused);
+    draw_cards(f, app, rows[1], focused);
+}
 
-    let title = match app.history.len() {
+fn draw_filter_bar(f: &mut Frame, app: &App, area: Rect, list_focused: bool) {
+    let has_filter = !app.history_filter.is_empty();
+
+    let content = if app.history_filter.is_empty() {
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                if list_focused { "type to filter…▌" } else { "type to filter…" },
+                Style::default().fg(C_DIM),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(&app.history_filter, Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                if list_focused { "▌" } else { "" },
+                Style::default().fg(C_ACCENT),
+            ),
+            Span::styled(
+                format!("  {} match{}", app.history_filtered.len(),
+                    if app.history_filtered.len() == 1 { "" } else { "es" }),
+                Style::default().fg(C_DIM),
+            ),
+        ])
+    };
+
+    let title = if has_filter {
+        Span::styled(" FILTER [Esc clear] ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled(" FILTER ", Style::default().fg(C_DIM))
+    };
+
+    f.render_widget(
+        Paragraph::new(content)
+            .block(Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(
+                    if has_filter { C_ACCENT }
+                    else if list_focused { C_BORDER_F }
+                    else { C_BORDER }
+                ))
+                .style(Style::default().bg(C_PANEL))),
+        area,
+    );
+}
+
+fn draw_cards(f: &mut Frame, app: &App, area: Rect, list_focused: bool) {
+    let count = if app.history_filter.is_empty() {
+        app.history.len()
+    } else {
+        app.history_filtered.len()
+    };
+
+    let title_str = match count {
         0 => " HISTORY ".to_string(),
         n => format!(" HISTORY  {n} "),
     };
 
-    let list = List::new(items)
-        .block(Block::default()
-            .title(Span::styled(title, Style::default()
-                .fg(if focused { C_ACCENT } else { C_DIM })
-                .add_modifier(Modifier::BOLD)))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if focused { C_BORDER_F } else { Color::Rgb(28,28,28) }))
-            .style(Style::default().bg(C_PANEL)));
+    let container = Block::default()
+        .title(Span::styled(title_str, Style::default()
+            .fg(if list_focused { C_ACCENT } else { C_DIM })
+            .add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if list_focused { C_BORDER_F } else { C_BORDER }))
+        .style(Style::default().bg(C_PANEL));
 
-    let mut state = ListState::default();
-    if !app.history.is_empty() { state.select(Some(app.history_idx)); }
-    f.render_stateful_widget(list, area, &mut state);
-}
+    let inner = container.inner(area);
+    f.render_widget(container, area);
 
-fn draw_entry(f: &mut Frame, app: &App, area: Rect) {
-    let rows = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(5),
-    ]).split(area);
-
-    if let Some(e) = app.history.get(app.history_idx) {
-        let mut lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                &e.title,
-                Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  TYPE    ", Style::default().fg(C_DIM)),
-                Span::styled(&e.media_type, Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
-            ]),
-            Line::from(vec![
-                Span::styled("  PLAYED  ", Style::default().fg(C_DIM)),
-                Span::styled(format!("{}×", e.play_count), Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)),
-            ]),
-            Line::from(vec![
-                Span::styled("  LAST    ", Style::default().fg(C_DIM)),
-                Span::styled(
-                    e.last_watched.format("%Y-%m-%d  %H:%M").to_string(),
-                    Style::default().fg(C_TEXT),
-                ),
-            ]),
-        ];
-
-        if let (Some(p), Some(t)) = (e.progress, e.total) {
-            lines.push(Line::from(vec![
-                Span::styled("  PROG    ", Style::default().fg(C_DIM)),
-                Span::styled(
-                    format!("{p} / {t}"),
-                    Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-        }
-
-        lines.push(Line::from(""));
-        if e.stream_url.is_some() {
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(" [P] REWATCH ", Style::default()
-                    .fg(Color::Rgb(0,0,0)).bg(C_ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled("   ", Style::default()),
-                Span::styled("[D] REMOVE", Style::default().fg(C_DIM)),
-            ]));
+    if count == 0 {
+        let msg = if !app.history_filter.is_empty() {
+            "  No matches."
         } else {
-            lines.push(Line::from(
-                Span::styled("  [D] remove from history", Style::default().fg(C_DIM)),
-            ));
-        }
-
+            "  Nothing watched yet."
+        };
         f.render_widget(
-            Paragraph::new(lines)
-                .block(focused_block(" ENTRY ", false)),
-            rows[0],
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(msg, Style::default().fg(C_DIM))),
+            ]),
+            inner,
         );
+        return;
+    }
 
-        // Progress gauge — yellow fill
-        let pct   = e.progress_pct().unwrap_or(0.0);
-        let label = if let (Some(p), Some(t)) = (e.progress, e.total) {
-            format!("{p} / {t}  {:.0}%", pct * 100.0)
+    // Each card: 5 rows tall (2 border + 3 content lines)
+    let card_h: u16 = 5;
+    let max_visible = (inner.height / card_h) as usize;
+    if max_visible == 0 { return; }
+
+    let start_idx = if app.history_idx >= max_visible {
+        app.history_idx - (max_visible - 1)
+    } else {
+        0
+    };
+
+    for slot in 0..max_visible {
+        let list_pos = start_idx + slot;
+        if list_pos >= count { break; }
+
+        let entry_idx = if app.history_filter.is_empty() {
+            list_pos
         } else {
-            "no progress tracked".to_string()
+            match app.history_filtered.get(list_pos) {
+                Some(&i) => i,
+                None => break,
+            }
         };
 
-        f.render_widget(
-            Gauge::default()
-                .block(Block::default()
-                    .title(Span::styled(" PROGRESS ", Style::default().fg(C_DIM)))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Rgb(28,28,28)))
-                    .style(Style::default().bg(C_PANEL)))
-                .gauge_style(Style::default().fg(C_ACCENT).bg(Color::Rgb(20,20,20)))
-                .ratio(pct)
-                .label(Span::styled(label, Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD))),
-            rows[1],
-        );
+        let Some(entry) = app.history.get(entry_idx) else { break };
+        let sel = list_pos == app.history_idx;
+
+        let card_area = Rect {
+            x: inner.x,
+            y: inner.y + (slot as u16 * card_h),
+            width: inner.width,
+            height: card_h,
+        };
+        if card_area.y + card_area.height > inner.y + inner.height { break; }
+
+        let border_style = if sel && list_focused {
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+        } else if sel {
+            Style::default().fg(C_TEXT)
+        } else {
+            Style::default().fg(Color::Rgb(32, 32, 32))
+        };
+
+        let card_bg = if sel { C_BG3 } else { C_BG };
+
+        let card_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .style(Style::default().bg(card_bg));
+
+        let card_inner = card_block.inner(card_area);
+        f.render_widget(card_block, card_area);
+
+        // Thumbnail column (7 cols) if cover_url exists and there's room
+        let thumb_w: u16 = 7;
+        if entry.cover_url.is_some() && card_inner.width > thumb_w + 6 {
+            let card_cols = Layout::horizontal([
+                Constraint::Length(thumb_w),
+                Constraint::Min(0),
+            ]).split(card_inner);
+
+            draw_mini_thumb(f, entry, card_cols[0]);
+            draw_card_text(f, entry, card_cols[1], sel, list_focused);
+        } else {
+            draw_card_text(f, entry, card_inner, sel, list_focused);
+        }
+    }
+}
+
+fn draw_mini_thumb(f: &mut Frame, entry: &crate::db::history::HistoryEntry, area: Rect) {
+    let first = entry.title.chars().next()
+        .and_then(|c| c.to_uppercase().next())
+        .unwrap_or('?');
+
+    let lines = vec![
+        Line::from(Span::styled("┌─────┐", Style::default().fg(Color::Rgb(45, 45, 45)))),
+        Line::from(vec![
+            Span::styled("│  ", Style::default().fg(Color::Rgb(45, 45, 45))),
+            Span::styled(first.to_string(), Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("  │", Style::default().fg(Color::Rgb(45, 45, 45))),
+        ]),
+        Line::from(Span::styled("└─────┘", Style::default().fg(Color::Rgb(45, 45, 45)))),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_card_text(
+    f: &mut Frame,
+    entry: &crate::db::history::HistoryEntry,
+    area: Rect,
+    sel: bool,
+    focused: bool,
+) {
+    let title_style = if sel && focused {
+        Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+    } else if sel {
+        Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)
     } else {
+        Style::default().fg(C_TEXT)
+    };
+
+    let max_title = (area.width as usize).saturating_sub(1);
+    let line1 = Line::from(Span::styled(trunc(&entry.title, max_title), title_style));
+
+    let date_str = entry.last_watched.format("%b %d  %H:%M").to_string();
+    let prog_str = match (entry.progress, entry.total) {
+        (Some(p), Some(t)) => format!("Ep {p}/{t}"),
+        (Some(p), None)    => format!("Ep {p}"),
+        _                  => String::new(),
+    };
+    let play_str = if entry.play_count > 1 {
+        format!("{}×", entry.play_count)
+    } else {
+        String::new()
+    };
+
+    let mut meta_spans = vec![Span::styled(date_str, Style::default().fg(C_DIM))];
+    if !prog_str.is_empty() {
+        meta_spans.push(Span::styled("  ", Style::default()));
+        meta_spans.push(Span::styled(prog_str, Style::default().fg(C_GREEN)));
+    }
+    if !play_str.is_empty() {
+        meta_spans.push(Span::styled("  ", Style::default()));
+        meta_spans.push(Span::styled(play_str, Style::default().fg(C_DIM)));
+    }
+    let line2 = Line::from(meta_spans);
+
+    let bar_width = (area.width as usize).saturating_sub(1);
+    let bar = entry.progress_bar(bar_width);
+    let bar_color = if sel && focused { C_ACCENT } else { Color::Rgb(60, 60, 0) };
+    let line3 = Line::from(Span::styled(bar, Style::default().fg(bar_color)));
+
+    f.render_widget(Paragraph::new(vec![line1, line2, line3]), area);
+}
+
+// ── Right pane: detail + episode list ─────────────────────────────────────────
+
+fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
+    let detail_focused   = app.focus == Focus::HistoryDetail;
+    let episodes_focused = app.focus == Focus::HistoryEpisodes;
+
+    let Some(entry) = app.history_selected().cloned() else {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(""),
                 Line::from(Span::styled("  Nothing watched yet.", Style::default().fg(C_DIM))),
                 Line::from(""),
-                Line::from(Span::styled("  Search something and press [P] to play.", Style::default().fg(C_DIM))),
+                Line::from(Span::styled(
+                    "  Search something and press [P] to play.",
+                    Style::default().fg(C_DIM),
+                )),
             ])
-            .block(focused_block(" HISTORY ", false)),
+            .block(focused_block(" DETAIL ", false)),
             area,
+        );
+        return;
+    };
+
+    // Stacked layout: metadata top, gauge, episode list bottom
+    let has_episodes = !app.history_episode_list.is_empty();
+    let rows = if has_episodes {
+        Layout::vertical([
+            Constraint::Length(12),  // metadata + cover
+            Constraint::Length(3),   // progress gauge
+            Constraint::Min(0),      // episode list
+        ]).split(area)
+    } else {
+        Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(3),
+            Constraint::Length(0),
+        ]).split(area)
+    };
+
+    // Top: cover image left, metadata right
+    let top_cols = Layout::horizontal([
+        Constraint::Length(22),
+        Constraint::Min(0),
+    ]).split(rows[0]);
+
+    draw_detail_cover(f, app, top_cols[0], detail_focused || episodes_focused);
+    draw_detail_meta(f, &entry, top_cols[1], detail_focused, episodes_focused);
+    draw_detail_gauge(f, &entry, rows[1]);
+
+    if has_episodes {
+        draw_episode_list(f, app, &entry, rows[2], episodes_focused);
+    }
+}
+
+fn draw_detail_cover(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(
+            if focused { Color::Rgb(80, 80, 0) } else { C_BORDER }
+        ))
+        .style(Style::default().bg(Color::Rgb(0, 0, 0)));
+
+    if let Some(ref mut protocol) = app.history_cover {
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let image_widget = ratatui_image::StatefulImage::default()
+            .resize(ratatui_image::Resize::Fit(Some(
+                image::imageops::FilterType::Lanczos3,
+            )));
+        f.render_stateful_widget(image_widget, inner, protocol);
+    } else {
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let ph = vec![
+            Line::from(""),
+            Line::from(Span::styled("  ┌──────────┐", Style::default().fg(Color::Rgb(35, 35, 35)))),
+            Line::from(Span::styled("  │          │", Style::default().fg(Color::Rgb(35, 35, 35)))),
+            Line::from(Span::styled("  │    ◆     │", Style::default().fg(C_ACCENT))),
+            Line::from(Span::styled("  │          │", Style::default().fg(Color::Rgb(35, 35, 35)))),
+            Line::from(Span::styled("  └──────────┘", Style::default().fg(Color::Rgb(35, 35, 35)))),
+        ];
+        f.render_widget(Paragraph::new(ph), inner);
+    }
+}
+
+fn draw_detail_meta(
+    f: &mut Frame,
+    entry: &crate::db::history::HistoryEntry,
+    area: Rect,
+    focused: bool,
+    episodes_focused: bool,
+) {
+    let max_w = (area.width as usize).saturating_sub(4);
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            trunc(&entry.title, max_w),
+            Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  TYPE    ", Style::default().fg(C_DIM)),
+            Span::styled(
+                entry.media_type.to_uppercase(),
+                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  PLAYED  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                format!("{}×", entry.play_count),
+                Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  LAST    ", Style::default().fg(C_DIM)),
+            Span::styled(
+                entry.last_watched.format("%Y-%m-%d  %H:%M").to_string(),
+                Style::default().fg(C_TEXT),
+            ),
+        ]),
+    ];
+
+    match (entry.progress, entry.total) {
+        (Some(p), Some(t)) => lines.push(Line::from(vec![
+            Span::styled("  PROG    ", Style::default().fg(C_DIM)),
+            Span::styled(format!("Ep {p} / {t}"), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+        ])),
+        (Some(p), None) => lines.push(Line::from(vec![
+            Span::styled("  PROG    ", Style::default().fg(C_DIM)),
+            Span::styled(format!("Ep {p}"), Style::default().fg(C_GREEN).add_modifier(Modifier::BOLD)),
+        ])),
+        _ => {}
+    }
+
+    if let Some(rating) = entry.user_rating {
+        lines.push(Line::from(vec![
+            Span::styled("  RATING  ", Style::default().fg(C_DIM)),
+            Span::styled(
+                format!("★ {:.1}", rating),
+                Style::default().fg(Color::Rgb(255, 200, 0)).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    // Action hints — context-aware
+    if focused {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(" [→] EPISODES ", Style::default()
+                .fg(Color::Rgb(0, 0, 0)).bg(C_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("   ", Style::default()),
+            Span::styled("[Del] remove", Style::default().fg(C_DIM)),
+            Span::styled("   ", Style::default()),
+            Span::styled("[←] back", Style::default().fg(Color::Rgb(50,50,0))),
+        ]));
+    } else if episodes_focused {
+        lines.push(Line::from(Span::styled(
+            "  [↑↓] navigate  [Enter] play  [←] back to detail",
+            Style::default().fg(C_DIM),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("[→] EPISODES", Style::default().fg(C_DIM)),
+            Span::styled("   ", Style::default()),
+            Span::styled("[Del] remove", Style::default().fg(C_DIM)),
+        ]));
+    }
+
+    let block = Block::default()
+        .title(Span::styled(
+            " ENTRY ",
+            Style::default()
+                .fg(if focused { C_ACCENT } else { C_DIM })
+                .add_modifier(if focused { Modifier::BOLD } else { Modifier::empty() }),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(
+            if focused { C_BORDER_F }
+            else if episodes_focused { Color::Rgb(50, 50, 0) }
+            else { C_BORDER }
+        ))
+        .style(Style::default().bg(C_PANEL));
+
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_detail_gauge(f: &mut Frame, entry: &crate::db::history::HistoryEntry, area: Rect) {
+    let pct = entry.progress_pct().unwrap_or(0.0);
+    let label = if let (Some(p), Some(t)) = (entry.progress, entry.total) {
+        format!("Ep {p} / {t}  —  {:.0}%", pct * 100.0)
+    } else {
+        "no progress tracked".to_string()
+    };
+
+    f.render_widget(
+        Gauge::default()
+            .block(Block::default()
+                .title(Span::styled(" PROGRESS ", Style::default().fg(C_DIM)))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(C_BORDER))
+                .style(Style::default().bg(C_PANEL)))
+            .gauge_style(Style::default().fg(C_ACCENT).bg(Color::Rgb(20, 20, 20)))
+            .ratio(pct)
+            .label(Span::styled(
+                label,
+                Style::default().fg(Color::Rgb(0, 0, 0)).add_modifier(Modifier::BOLD),
+            )),
+        area,
+    );
+}
+
+// ── Episode list ──────────────────────────────────────────────────────────────
+
+fn draw_episode_list(
+    f: &mut Frame,
+    app: &App,
+    entry: &crate::db::history::HistoryEntry,
+    area: Rect,
+    focused: bool,
+) {
+    let ep_count = app.history_episode_list.len();
+    let loading  = app.history_episodes_loading;
+
+    let title = if loading {
+        Span::styled(
+            format!(" {} EPISODES ", app.spinner.symbol()),
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            format!(" EPISODES  {} ", ep_count),
+            Style::default()
+                .fg(if focused { C_ACCENT } else { C_DIM })
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let container = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if focused { C_BORDER_F } else { C_BORDER }))
+        .style(Style::default().bg(C_PANEL));
+
+    let inner = container.inner(area);
+    f.render_widget(container, area);
+
+    if ep_count == 0 { return; }
+
+    // Each episode row: 1 line tall — no borders
+    let row_h: u16 = 1;
+    let max_visible = inner.height as usize;
+    if max_visible == 0 { return; }
+
+    let sel_idx = app.history_episode_idx;
+    let start = if sel_idx >= max_visible {
+        sel_idx - (max_visible - 1)
+    } else {
+        0
+    };
+
+    // Build a lookup map: episode_number -> EpisodeRecord
+    use std::collections::HashMap;
+    let rec_map: HashMap<&str, &crate::db::history::EpisodeRecord> = app
+        .history_episodes
+        .iter()
+        .map(|r| (r.episode_number.as_str(), r))
+        .collect();
+
+    let last_watched = entry.progress.map(|p| p.to_string());
+
+    for slot in 0..max_visible {
+        let list_pos = start + slot;
+        if list_pos >= ep_count { break; }
+
+        let ep_str = &app.history_episode_list[list_pos];
+        let rec    = rec_map.get(ep_str.as_str());
+        let sel    = list_pos == sel_idx;
+
+        // Status icon
+        let (icon, icon_style) = match rec {
+            Some(r) if r.fully_watched       => ("✓", Style::default().fg(C_GREEN)),
+            Some(r) if r.position_seconds > 5.0 => ("▶", Style::default().fg(C_ACCENT)),
+            _                                => ("·", Style::default().fg(C_DIM)),
+        };
+
+        // Is this the last watched episode?
+        let is_current = last_watched.as_deref() == Some(ep_str.as_str());
+
+        let ep_label = format!("Ep {ep_str}");
+
+        // Progress info for partially-watched
+        let progress_str = rec.and_then(|r| {
+            if r.position_seconds > 5.0 && !r.fully_watched && r.duration_seconds > 0.0 {
+                Some(format!(" {:.0}%", (r.position_seconds / r.duration_seconds * 100.0)))
+            } else {
+                None
+            }
+        });
+
+        let row_area = Rect {
+            x: inner.x,
+            y: inner.y + (slot as u16 * row_h),
+            width: inner.width,
+            height: 1,
+        };
+
+        let (row_bg, label_style) = if sel && focused {
+            (C_BG3, Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        } else if sel {
+            (C_BG3, Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD))
+        } else if is_current {
+            (C_BG, Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD))
+        } else {
+            (C_BG, Style::default().fg(C_TEXT))
+        };
+
+        let mut spans = vec![
+            Span::styled(" ", Style::default().bg(row_bg)),
+            Span::styled(icon, icon_style.bg(row_bg)),
+            Span::styled("  ", Style::default().bg(row_bg)),
+            Span::styled(&ep_label, label_style.bg(row_bg)),
+        ];
+
+        if is_current && !sel {
+            spans.push(Span::styled(" ◀", Style::default().fg(C_ACCENT).bg(row_bg)));
+        }
+
+        if let Some(pstr) = progress_str {
+            spans.push(Span::styled(pstr, Style::default().fg(C_DIM).bg(row_bg)));
+        }
+
+        // Resume hint on selected row
+        if sel && focused {
+            let rec_pos = rec.map(|r| r.position_seconds).unwrap_or(0.0);
+            if rec_pos > 5.0 {
+                let mins = (rec_pos / 60.0) as u64;
+                let secs = (rec_pos as u64) % 60;
+                spans.push(Span::styled(
+                    format!("  resume {mins}:{secs:02}"),
+                    Style::default().fg(Color::Rgb(50, 50, 0)).bg(row_bg),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "  [Enter] play",
+                    Style::default().fg(Color::Rgb(50, 50, 0)).bg(row_bg),
+                ));
+            }
+        }
+
+        f.render_widget(
+            Paragraph::new(Line::from(spans))
+                .style(Style::default().bg(row_bg)),
+            row_area,
         );
     }
 }

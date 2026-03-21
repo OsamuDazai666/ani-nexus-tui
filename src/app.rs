@@ -1,7 +1,8 @@
 use crate::{
     api::{allanime, ContentItem},
-    db::history::{HistoryEntry, HistoryStore},
+    db::history::{EpisodeRecord, HistoryEntry, HistoryStore},
     player,
+    player::PlaybackEvent,
 };
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -17,7 +18,7 @@ pub enum Tab { Anime, History }
 // ── Focus ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Focus { Search, Results, Detail, History, EpisodePrompt }
+pub enum Focus { Search, Results, Detail, History, HistoryDetail, HistoryEpisodes, EpisodePrompt }
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
 
@@ -66,13 +67,14 @@ pub enum AppMsg {
     SearchResults { items: Vec<ContentItem>, gen: u64 },
     MoreResults(Vec<ContentItem>),
     DetailLoaded(ContentItem),
-    /// Raw bytes fetched — url for byte cache, item_id travels with the bytes so decode
-    /// is tagged correctly even if the user scrolled away before the fetch completed
     ImageFetched { url: String, item_id: String, bytes: Vec<u8> },
-    /// Decoded RGBA image ready — create StatefulProtocol and store in rgba_cache
     ImageDecoded { id: String, image: image::DynamicImage },
     StreamUrl(String),
     EpisodeList { id: String, eps: Vec<String> },
+    HistoryEpisodeList { anime_id: String, eps: Vec<String> },
+    /// Request main loop to launch mpv synchronously (terminal-safe)
+    LaunchMpv { url: String, anime_id: String, episode: String, resume_from: f64 },
+    Playback(PlaybackEvent),
     Error(String),
 }
 
@@ -100,8 +102,17 @@ pub struct App {
     pub detail_scroll: u16,
 
     // History
-    pub history:     Vec<HistoryEntry>,
-    pub history_idx: usize,
+    pub history:            Vec<HistoryEntry>,
+    pub history_idx:        usize,
+    pub history_filter:     String,
+    pub history_filtered:   Vec<usize>,
+    pub history_cover:      Option<ratatui_image::protocol::StatefulProtocol>,
+    pub history_cover_id:   Option<String>,
+    // Episode list for the selected history entry
+    pub history_episodes:         Vec<EpisodeRecord>,   // DB records (progress/status)
+    pub history_episode_list:     Vec<String>,          // ordered episode strings from cache
+    pub history_episode_idx:      usize,
+    pub history_episodes_loading: bool,
 
     // Episode prompt + playback options
     pub episode_input:  String,
@@ -126,6 +137,8 @@ pub struct App {
     pub image_picker: ratatui_image::picker::Picker,
     pub cover_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
     pub needs_redraw: bool,
+    /// Set by handle_msg(LaunchMpv) — consumed by main loop to run mpv on main thread
+    pub pending_mpv: Option<(String, String, String, f64)>, // (url, anime_id, episode, resume)
 
     // ── In-memory caches ──────────────────────────────────────────────────────
     pub image_cache:  std::collections::HashMap<String, Vec<u8>>,
@@ -168,6 +181,14 @@ impl App {
             detail_scroll: 0,
             history,
             history_idx:   0,
+            history_filter:   String::new(),
+            history_filtered: Vec::new(),
+            history_cover:    None,
+            history_cover_id: None,
+            history_episodes:         Vec::new(),
+            history_episode_list:     Vec::new(),
+            history_episode_idx:      0,
+            history_episodes_loading: false,
             episode_input:    String::new(),
             episode_cursor:   0,
             stream_mode:      "sub".to_string(),
@@ -185,6 +206,7 @@ impl App {
             image_picker,
             cover_protocol: None,
             needs_redraw:  false,
+            pending_mpv:   None,
             image_cache:       std::collections::HashMap::new(),
             image_cache_order: std::collections::VecDeque::new(),
             detail_cache:       std::collections::HashMap::new(),
@@ -207,6 +229,12 @@ impl App {
             v
         };
         for msg in msgs { self.handle_msg(msg); }
+
+        // Lazily load cover and episode list for selected history entry
+        if self.active_tab == Tab::History {
+            self.load_history_cover();
+            self.load_history_episodes();
+        }
 
         Ok(())
     }
@@ -269,6 +297,10 @@ impl App {
                 if self.selected.as_ref().map(|s| s.id() == id).unwrap_or(false) {
                     self.build_cover_protocol(&id);
                 }
+                // Also build history cover if it matches the currently viewed history entry
+                if self.history_cover_id.as_deref() == Some(id.as_str()) {
+                    self.build_history_cover_protocol(&id);
+                }
             }
 
             // Episode list fetched — store in detail cache and apply if still selected
@@ -288,11 +320,65 @@ impl App {
                 self.is_searching = false;
                 self.status = "Playing".to_string();
                 self.toast_success("Launching mpv…");
-                if let Err(e) = player::launch_mpv_url(&url) {
-                    self.toast_error(format!("mpv: {e}"));
-                }
+                // Defer to main loop for terminal-safe launch
+                self.pending_mpv = Some((url, String::new(), String::new(), 0.0));
                 self.needs_redraw = true;
             }
+
+            AppMsg::LaunchMpv { url, anime_id, episode, resume_from } => {
+                self.toast_success("Launching mpv…");
+                self.pending_mpv = Some((url, anime_id, episode, resume_from));
+                self.needs_redraw = true;
+            }
+            AppMsg::HistoryEpisodeList { anime_id, eps } => {
+                // Save to DB cache
+                let _ = self.db.save_episodes_cache(&anime_id, &eps);
+                // Reload the entry so its cache timestamp is fresh
+                if let Ok(Some(updated)) = self.db.get(&anime_id) {
+                    if let Some(pos) = self.history.iter().position(|e| e.id == anime_id) {
+                        self.history[pos] = updated;
+                    }
+                }
+                // Apply if still the selected entry
+                if self.history_selected().map(|e| e.id == anime_id).unwrap_or(false) {
+                    self.history_episode_list = eps;
+                    self.history_episodes_loading = false;
+                    // Reload episode records from DB
+                    if let Ok(recs) = self.db.load_episodes(&anime_id) {
+                        self.history_episodes = recs;
+                    }
+                }
+            }
+
+            AppMsg::Playback(event) => {
+                match event {
+                    PlaybackEvent::Position { anime_id, episode, position, duration } => {
+                        let _ = self.db.update_position(&anime_id, &episode, position, duration);
+                        // Refresh episode records if this is the open history entry
+                        if self.history_selected().map(|e| e.id == anime_id).unwrap_or(false) {
+                            if let Ok(recs) = self.db.load_episodes(&anime_id) {
+                                self.history_episodes = recs;
+                            }
+                        }
+                    }
+                    PlaybackEvent::Finished { anime_id, episode, position, duration } => {
+                        let _ = self.db.update_position(&anime_id, &episode, position, duration);
+                        // Refresh history entry and episode list
+                        if let Ok(Some(updated)) = self.db.get(&anime_id) {
+                            if let Some(pos) = self.history.iter().position(|e| e.id == anime_id) {
+                                self.history[pos] = updated;
+                            }
+                        }
+                        if self.history_selected().map(|e| e.id == anime_id).unwrap_or(false) {
+                            if let Ok(recs) = self.db.load_episodes(&anime_id) {
+                                self.history_episodes = recs;
+                            }
+                        }
+                        self.toast_success("Playback saved");
+                    }
+                }
+            }
+
             AppMsg::Error(e) => {
                 self.is_searching = false;
                 self.toast_error(e);
@@ -311,6 +397,140 @@ impl App {
             self.cover_protocol = Some(protocol);
             self.save_debug_image(id);
         }
+    }
+
+    /// Build history_cover from rgba_cache for the given history entry id.
+    fn build_history_cover_protocol(&mut self, id: &str) {
+        if let Some(img) = self.rgba_cache.get(id) {
+            let protocol = self.image_picker.new_resize_protocol(img.clone());
+            self.history_cover = Some(protocol);
+            self.history_cover_id = Some(id.to_string());
+        }
+    }
+
+    /// Kick off a cover fetch for the currently selected history entry.
+    pub fn load_history_cover(&mut self) {
+        let Some(entry) = self.history_selected().cloned() else { return };
+        let Some(url) = entry.cover_url.clone() else { return };
+        let id = entry.id.clone();
+
+        // Already loaded for this entry
+        if self.history_cover_id.as_deref() == Some(id.as_str()) { return; }
+
+        self.history_cover = None;
+        self.history_cover_id = Some(id.clone());
+
+        // Fast path — already decoded
+        if self.rgba_cache.contains_key(&id) {
+            self.build_history_cover_protocol(&id);
+            return;
+        }
+
+        let tx = self.msg_tx.clone();
+        if let Some(cached_bytes) = self.image_cache.get(&url).cloned() {
+            tokio::spawn(async move {
+                if let Ok(img) = image::load_from_memory(&cached_bytes) {
+                    let dyn_img = image::DynamicImage::ImageRgba8(img.into_rgba8());
+                    let _ = tx.send(AppMsg::ImageDecoded { id, image: dyn_img });
+                }
+            });
+        } else {
+            tokio::spawn(async move {
+                let client = reqwest::Client::builder()
+                    .user_agent("Mozilla/5.0")
+                    .timeout(std::time::Duration::from_secs(15))
+                    .build().unwrap_or_default();
+                if let Ok(r) = client.get(&url).send().await {
+                    if let Ok(b) = r.bytes().await {
+                        let bytes = b.to_vec();
+                        let _ = tx.send(AppMsg::ImageFetched { url, item_id: id.clone(), bytes: bytes.clone() });
+                        if let Ok(img) = image::load_from_memory(&bytes) {
+                            let dyn_img = image::DynamicImage::ImageRgba8(img.into_rgba8());
+                            let _ = tx.send(AppMsg::ImageDecoded { id, image: dyn_img });
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    /// Load/refresh the episode list for the currently selected history entry.
+    /// Uses the cached list from SQLite if fresh; otherwise fetches from API.
+    pub fn load_history_episodes(&mut self) {
+        let Some(entry) = self.history_selected().cloned() else {
+            // Selection changed — clear stale data
+            if !self.history_episode_list.is_empty() {
+                self.history_episode_list.clear();
+                self.history_episodes.clear();
+                self.history_episode_idx = 0;
+            }
+            return;
+        };
+
+        // If we already have the list for this entry and cache is fresh, nothing to do
+        let already_loaded = !self.history_episode_list.is_empty()
+            && self.history_episodes.first()
+                .map(|r| r.anime_id == entry.id)
+                .unwrap_or(false);
+
+        if already_loaded && !entry.episodes_cache_stale() {
+            return;
+        }
+
+        // If switching to a different anime, reset immediately
+        let switching = self.history_episodes.first()
+            .map(|r| r.anime_id != entry.id)
+            .unwrap_or(true);
+        if switching {
+            self.history_episode_list.clear();
+            self.history_episodes.clear();
+            self.history_episode_idx = 0;
+
+            // Load episode records from DB instantly (no API call needed for this)
+            if let Ok(recs) = self.db.load_episodes(&entry.id) {
+                self.history_episodes = recs;
+            }
+
+            // If we have a fresh cache, use it directly
+            if let Some(ref cached) = entry.episodes_cache {
+                if !entry.episodes_cache_stale() {
+                    self.history_episode_list = cached.clone();
+                    // Jump idx to last watched episode
+                    self.history_episode_idx = self.last_watched_episode_idx();
+                    return;
+                }
+            }
+        }
+
+        // Need fresh data from API
+        if self.history_episodes_loading { return; }
+        self.history_episodes_loading = true;
+
+        let tx       = self.msg_tx.clone();
+        let anime_id = entry.id.clone();
+        let mode     = self.stream_mode.clone();
+
+        tokio::spawn(async move {
+            match player::fetch_episode_list(&anime_id, &mode).await {
+                Ok(eps) => {
+                    let _ = tx.send(AppMsg::HistoryEpisodeList { anime_id, eps });
+                }
+                Err(e) => {
+                    let _ = tx.send(AppMsg::Error(format!("Episode list: {e}")));
+                }
+            }
+        });
+    }
+
+    /// Index into history_episode_list for the last watched episode (from progress field).
+    fn last_watched_episode_idx(&self) -> usize {
+        let Some(entry) = self.history_selected() else { return 0 };
+        let Some(progress) = entry.progress else { return 0 };
+        let target = progress.to_string();
+        self.history_episode_list
+            .iter()
+            .position(|ep| ep == &target)
+            .unwrap_or(0)
     }
 
     fn save_debug_image(&self, id: &str) {
@@ -409,7 +629,7 @@ impl App {
     fn prefetch_episode_lists(&self, start: usize, end: usize) {
         let mode = self.stream_mode.clone();
         for item in self.results.get(start..end).unwrap_or(&[]) {
-            let ContentItem::Anime(a) = item else { continue };
+            let ContentItem::Anime(a) = item;
             let id = a.id.clone();
             if self.detail_cache.get(&id).and_then(|c| c.episode_list.as_ref()).is_some() {
                 continue; // already cached
@@ -443,8 +663,10 @@ impl App {
             return Ok(true);
         }
 
-        // Global: '/' jumps to search bar from anywhere except Search itself
-        if key.code == KeyCode::Char('/') && self.focus != Focus::Search {
+        // Global: '/' jumps to search bar from anywhere except Search itself or History panes
+        if key.code == KeyCode::Char('/') && self.focus != Focus::Search
+            && self.focus != Focus::History && self.focus != Focus::HistoryDetail
+        {
             self.focus = Focus::Search;
             self.search_cursor = self.search_input.len();
             return Ok(false);
@@ -468,6 +690,8 @@ impl App {
                         Focus::Detail          => Focus::Search,
                         Focus::Search          => Focus::Search,
                         Focus::History         => Focus::History,
+                        Focus::HistoryDetail   => Focus::HistoryDetail,
+                        Focus::HistoryEpisodes => Focus::HistoryEpisodes,
                     };
                     return Ok(false);
                 }
@@ -476,8 +700,10 @@ impl App {
                         Focus::Search   => { if !self.results.is_empty() { Focus::Results } else { Focus::Search } }
                         Focus::Results  => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Results } }
                         Focus::Detail   => { if self.selected.is_some() { Focus::EpisodePrompt } else { Focus::Detail } }
-                        Focus::EpisodePrompt => Focus::EpisodePrompt,
-                        Focus::History       => Focus::History,
+                        Focus::EpisodePrompt   => Focus::EpisodePrompt,
+                        Focus::History         => Focus::History,
+                        Focus::HistoryDetail   => Focus::HistoryEpisodes,
+                        Focus::HistoryEpisodes => Focus::HistoryEpisodes,
                     };
                     return Ok(false);
                 }
@@ -487,7 +713,9 @@ impl App {
                         Focus::Detail          => Focus::Detail,
                         Focus::EpisodePrompt   => Focus::EpisodePrompt,
                         Focus::Search          => Focus::Search,
-                        Focus::History         => Focus::History,
+                        Focus::History         => Focus::HistoryDetail,
+                        Focus::HistoryDetail   => Focus::HistoryEpisodes,
+                        Focus::HistoryEpisodes => Focus::HistoryEpisodes,
                     };
                     return Ok(false);
                 }
@@ -498,6 +726,8 @@ impl App {
                         Focus::Results         => Focus::Results,
                         Focus::Search          => Focus::Search,
                         Focus::History         => Focus::History,
+                        Focus::HistoryDetail   => Focus::History,
+                        Focus::HistoryEpisodes => Focus::HistoryDetail,
                     };
                     return Ok(false);
                 }
@@ -517,6 +747,8 @@ impl App {
             Focus::Results         => self.key_results(key).await?,
             Focus::Detail          => self.key_detail(key).await?,
             Focus::History         => self.key_history(key).await?,
+            Focus::HistoryDetail   => self.key_history_detail(key).await?,
+            Focus::HistoryEpisodes => self.key_history_episodes(key).await?,
             Focus::EpisodePrompt   => self.key_episode_prompt(key).await?,
         }
         Ok(false)
@@ -624,35 +856,257 @@ impl App {
 
     async fn key_history(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Up   | KeyCode::Char('k') => { if self.history_idx > 0 { self.history_idx -= 1; } }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.history_idx + 1 < self.history.len() { self.history_idx += 1; }
-            }
-            KeyCode::Delete | KeyCode::Char('d') => {
-                if let Some(e) = self.history.get(self.history_idx).cloned() {
-                    let _ = self.db.remove(&e.id);
-                    self.toast_info(format!("Removed \"{}\"", e.title));
-                    self.history.remove(self.history_idx);
-                    if self.history_idx > 0 { self.history_idx -= 1; }
+            KeyCode::Up | KeyCode::Char('k') if self.history_filter.is_empty() => {
+                if self.history_idx > 0 {
+                    self.history_idx -= 1;
+                    self.history_cover = None;
+                    self.history_cover_id = None;
                 }
             }
-            KeyCode::Char('p') => {
-                if let Some(e) = self.history.get(self.history_idx).cloned() {
-                    if let Some(url) = &e.stream_url {
-                        let url = url.clone();
-                        if let Err(err) = player::launch_mpv_url(&url) {
-                            self.toast_error(err.to_string());
+            KeyCode::Up => {
+                if self.history_idx > 0 {
+                    self.history_idx -= 1;
+                    self.history_cover = None;
+                    self.history_cover_id = None;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.history_filter.is_empty() => {
+                let len = if self.history_filter.is_empty() {
+                    self.history.len()
+                } else {
+                    self.history_filtered.len()
+                };
+                if self.history_idx + 1 < len {
+                    self.history_idx += 1;
+                    self.history_cover = None;
+                    self.history_cover_id = None;
+                }
+            }
+            KeyCode::Down => {
+                let len = if self.history_filter.is_empty() {
+                    self.history.len()
+                } else {
+                    self.history_filtered.len()
+                };
+                if self.history_idx + 1 < len {
+                    self.history_idx += 1;
+                    self.history_cover = None;
+                    self.history_cover_id = None;
+                }
+            }
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if self.history_filter.is_empty() => {
+                self.focus = Focus::HistoryDetail;
+            }
+            KeyCode::Right if !self.history_filter.is_empty() => {
+                self.focus = Focus::HistoryDetail;
+            }
+            KeyCode::Delete => {
+                let actual_idx = if self.history_filter.is_empty() {
+                    Some(self.history_idx)
+                } else {
+                    self.history_filtered.get(self.history_idx).copied()
+                };
+                if let Some(idx) = actual_idx {
+                    if let Some(e) = self.history.get(idx).cloned() {
+                        let _ = self.db.remove(&e.id);
+                        self.toast_info(format!("Removed \"{}\"", e.title));
+                        self.history.remove(idx);
+                        self.history_cover = None;
+                        self.history_cover_id = None;
+                        self.history_episode_list.clear();
+                        self.history_episodes.clear();
+                        self.history_episode_idx = 0;
+                        self.history_episodes_loading = false;
+                        self.rebuild_history_filter();
+                        let new_len = if self.history_filter.is_empty() {
+                            self.history.len()
                         } else {
-                            self.toast_success("Launching mpv…");
+                            self.history_filtered.len()
+                        };
+                        if self.history_idx > 0 && self.history_idx >= new_len {
+                            self.history_idx = new_len.saturating_sub(1);
                         }
-                    } else {
-                        self.toast_info("No stream URL saved for this entry");
+                    }
+                }
+            }
+            KeyCode::Right => { self.focus = Focus::HistoryDetail; }
+            KeyCode::Esc => {
+                if !self.history_filter.is_empty() {
+                    self.history_filter.clear();
+                    self.history_filtered.clear();
+                    self.history_idx = 0;
+                    self.history_cover = None;
+                    self.history_cover_id = None;
+                }
+            }
+            KeyCode::Backspace => {
+                if !self.history_filter.is_empty() {
+                    self.history_filter.pop();
+                    self.history_idx = 0;
+                    self.history_cover = None;
+                    self.history_cover_id = None;
+                    self.rebuild_history_filter();
+                }
+            }
+            KeyCode::Char(c) => {
+                self.history_filter.push(c);
+                self.history_idx = 0;
+                self.history_cover = None;
+                self.history_cover_id = None;
+                self.rebuild_history_filter();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn key_history_detail(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Left | KeyCode::Esc => { self.focus = Focus::History; }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if !self.history_episode_list.is_empty() {
+                    self.focus = Focus::HistoryEpisodes;
+                }
+            }
+            KeyCode::Delete => {
+                let actual_idx = if self.history_filter.is_empty() {
+                    Some(self.history_idx)
+                } else {
+                    self.history_filtered.get(self.history_idx).copied()
+                };
+                if let Some(idx) = actual_idx {
+                    if let Some(e) = self.history.get(idx).cloned() {
+                        let _ = self.db.remove(&e.id);
+                        self.toast_info(format!("Removed \"{}\"", e.title));
+                        self.history.remove(idx);
+                        self.history_cover = None;
+                        self.history_cover_id = None;
+                        self.history_episode_list.clear();
+                        self.history_episodes.clear();
+                        self.rebuild_history_filter();
+                        self.focus = Focus::History;
                     }
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    async fn key_history_episodes(&mut self, key: KeyEvent) -> Result<()> {
+        let ep_count = self.history_episode_list.len();
+        match key.code {
+            KeyCode::Left | KeyCode::Esc | KeyCode::Char('h') => {
+                self.focus = Focus::HistoryDetail;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.history_episode_idx > 0 {
+                    self.history_episode_idx -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.history_episode_idx + 1 < ep_count {
+                    self.history_episode_idx += 1;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('p') => {
+                // Jump to this episode in the Anime tab — switch tab, search, pre-select episode
+                let Some(entry) = self.history_selected().cloned() else { return Ok(()); };
+                let Some(ep_str) = self.history_episode_list.get(self.history_episode_idx).cloned()
+                    else { return Ok(()); };
+
+                // Get resume position from DB
+                let ep_record = self.db.get_episode(&entry.id, &ep_str).ok().flatten();
+                let resume_from = ep_record.as_ref()
+                    .filter(|r| !r.fully_watched && r.position_seconds > 5.0)
+                    .map(|r| r.position_seconds)
+                    .unwrap_or(0.0);
+
+                // Get stream URL if already saved in DB
+                let saved_url = ep_record.and_then(|r| r.stream_url);
+
+                let anime_id  = entry.id.clone();
+                let ep_clone  = ep_str.clone();
+                let tx        = self.msg_tx.clone();
+                let mode      = self.stream_mode.clone();
+                let quality   = self.stream_quality.clone();
+                let db        = self.db.clone();
+
+                self.toast_info(format!("Loading Ep {ep_str}…"));
+
+                if let Some(url) = saved_url {
+                    // Already have URL — send directly to main loop
+                    let _ = self.msg_tx.send(AppMsg::LaunchMpv {
+                        url,
+                        anime_id: anime_id.clone(),
+                        episode:  ep_clone.clone(),
+                        resume_from,
+                    });
+                } else {
+                    // Resolve URL first, then send LaunchMpv
+                    let ep_num: u32 = ep_str.parse().unwrap_or(1);
+                    let tx_app = tx.clone();
+                    tokio::spawn(async move {
+                        match player::stream_anime(&anime_id, ep_num, &mode, &quality).await {
+                            Ok(url) => {
+                                let rec = crate::db::history::EpisodeRecord {
+                                    anime_id:         anime_id.clone(),
+                                    episode_number:   ep_clone.clone(),
+                                    stream_url:       Some(url.clone()),
+                                    watched:          true,
+                                    watch_timestamp:  Some(chrono::Utc::now()),
+                                    position_seconds: 0.0,
+                                    duration_seconds: 0.0,
+                                    fully_watched:    false,
+                                };
+                                let _ = db.save_episode(&rec);
+                                let _ = tx_app.send(AppMsg::LaunchMpv {
+                                    url,
+                                    anime_id,
+                                    episode: ep_clone,
+                                    resume_from,
+                                });
+                            }
+                            Err(e) => { let _ = tx_app.send(AppMsg::Error(e.to_string())); }
+                        }
+                    });
+                }
+
+                // Update progress in DB and in memory
+                let ep_num: u32 = ep_str.parse().unwrap_or(0);
+                if ep_num > 0 {
+                    let _ = self.db.update_progress(&entry.id, ep_num);
+                    if let Some(pos) = self.history.iter().position(|e| e.id == entry.id) {
+                        self.history[pos].progress = Some(ep_num);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Rebuild history_filtered from history_filter using fuzzy match.
+    pub fn rebuild_history_filter(&mut self) {
+        if self.history_filter.is_empty() {
+            self.history_filtered.clear();
+            return;
+        }
+        let needle: Vec<char> = self.history_filter.to_lowercase().chars().collect();
+        self.history_filtered = self.history.iter().enumerate()
+            .filter(|(_, e)| fuzzy_match(&e.title.to_lowercase(), &needle))
+            .map(|(i, _)| i)
+            .collect();
+    }
+
+    /// Get the currently selected HistoryEntry, respecting the filter.
+    pub fn history_selected(&self) -> Option<&HistoryEntry> {
+        if self.history_filter.is_empty() {
+            self.history.get(self.history_idx)
+        } else {
+            self.history_filtered.get(self.history_idx)
+                .and_then(|&i| self.history.get(i))
+        }
     }
 
     // ── Navigation helpers ────────────────────────────────────────────────────
@@ -699,9 +1153,17 @@ impl App {
         self.search_cursor = 0;
         self.current_page = 1;
         self.has_more    = false;
+        // Clear history filter when switching tabs
+        self.history_filter.clear();
+        self.history_filtered.clear();
+        self.history_cover = None;
+        self.history_cover_id = None;
+        self.history_episode_list.clear();
+        self.history_episodes.clear();
+        self.history_episode_idx = 0;
+        self.history_episodes_loading = false;
         self.focus = if tab == Tab::History { Focus::History } else { Focus::Search };
         self.status = format!("{tab}  •  type to search");
-        // Note: image_cache and detail_cache intentionally kept across tab switches
     }
 
     // ── Search ────────────────────────────────────────────────────────────────
@@ -928,16 +1390,25 @@ impl App {
                     let quality = self.stream_quality.clone();
                     let id = match &item {
                         ContentItem::Anime(a) => a.id.clone(),
-                        _ => String::new(),
                     };
                     self.toast_info(format!("Fetching ep {ep} [{mode}]…"));
                     tokio::spawn(async move {
                         match player::stream_anime(&id, ep, &mode, &quality).await {
                             Ok(url) => {
-                                let mut entry = HistoryEntry::from_content(&item);
-                                entry.stream_url = Some(url.clone());
-                                entry.progress   = Some(ep);
+                                let entry = HistoryEntry::from_content(&item);
                                 let _ = db.save(&entry);
+                                // Save episode stream URL in the episodes table
+                                let rec = crate::db::history::EpisodeRecord {
+                                    anime_id:         entry.id.clone(),
+                                    episode_number:   ep.to_string(),
+                                    stream_url:       Some(url.clone()),
+                                    watched:          true,
+                                    watch_timestamp:  Some(chrono::Utc::now()),
+                                    position_seconds: 0.0,
+                                    duration_seconds: 0.0,
+                                    fully_watched:    false,
+                                };
+                                let _ = db.save_episode(&rec);
                                 let _ = tx.send(AppMsg::StreamUrl(url));
                             }
                             Err(e) => { let _ = tx.send(AppMsg::Error(e.to_string())); }
@@ -989,4 +1460,20 @@ fn detect_image_protocol() -> ImageProtocol {
     } else {
         ImageProtocol::HalfBlock
     }
+}
+
+// ── Fuzzy match ───────────────────────────────────────────────────────────────
+
+/// Returns true if every char in `needle` appears in `haystack` in order.
+fn fuzzy_match(haystack: &str, needle: &[char]) -> bool {
+    if needle.is_empty() { return true; }
+    let mut it = haystack.chars();
+    let mut ni = 0;
+    for c in it.by_ref() {
+        if c == needle[ni] {
+            ni += 1;
+            if ni == needle.len() { return true; }
+        }
+    }
+    false
 }

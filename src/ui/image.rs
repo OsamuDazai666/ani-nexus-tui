@@ -22,8 +22,8 @@ pub fn draw_cover(f: &mut Frame, app: &mut App, area: Rect) {
         // over-shrink due to wrong cell-size assumptions.
         let cell_px_w: u32 = 8;  // typical GNOME Terminal cell width in px
         let cell_px_h: u32 = 8;  // half-block: each row = 2 half-rows, so treat as 8px
-        let target_w = (inner.width as u32).saturating_mul(cell_px_w);
-        let target_h = (inner.height as u32).saturating_mul(cell_px_h * 2);
+        let _target_w = (inner.width as u32).saturating_mul(cell_px_w);
+        let _target_h = (inner.height as u32).saturating_mul(cell_px_h * 2);
 
         let image_widget = ratatui_image::StatefulImage::default()
             .resize(ratatui_image::Resize::Fit(Some(

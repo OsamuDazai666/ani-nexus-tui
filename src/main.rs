@@ -6,7 +6,7 @@ mod player;
 mod ui;
 
 use anyhow::Result;
-use app::App;
+use app::{App, AppMsg};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
@@ -82,14 +82,48 @@ async fn run<B: ratatui::backend::Backend>(
         }
         terminal.draw(|f| ui::draw(f, app))?;
 
+        // Run mpv on the main thread — the only way to safely do terminal teardown/restore.
+        // pending_mpv is set by handle_msg(LaunchMpv) or handle_msg(StreamUrl).
+        if let Some((url, anime_id, episode, resume_from)) = app.pending_mpv.take() {
+            let db = app.db.clone();
+            let tx = app.msg_tx.clone();
+
+            // Tear down ratatui before handing terminal to mpv
+            crossterm::terminal::disable_raw_mode()?;
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::LeaveAlternateScreen,
+                crossterm::event::DisableMouseCapture,
+            )?;
+
+            let (pos, dur) = player::launch_mpv_tracked(&url, &anime_id, &episode, resume_from, None)
+                .unwrap_or((0.0, 0.0));
+
+            // Restore ratatui
+            crossterm::terminal::enable_raw_mode()?;
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::EnterAlternateScreen,
+                crossterm::event::EnableMouseCapture,
+            )?;
+
+            // Save position and notify app
+            if !anime_id.is_empty() && !episode.is_empty() {
+                let _ = db.update_position(&anime_id, &episode, pos, dur);
+                let _ = tx.send(AppMsg::Playback(player::PlaybackEvent::Finished {
+                    anime_id, episode, position: pos, duration: dur,
+                }));
+            }
+
+            terminal.clear()?;
+            app.needs_redraw = true;
+            continue;
+        }
+
         // Poll for input (non-blocking — 100ms max)
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) => {
-                    // On Windows, crossterm emits both Press and Release events
-                    // for every keystroke. Only handle Press to avoid every key
-                    // being processed twice. On Linux/macOS all events are Press
-                    // so this filter is a no-op there.
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
