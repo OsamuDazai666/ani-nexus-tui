@@ -83,12 +83,18 @@ pub fn launch_mpv_tracked(
     let needs_referer = url.contains("fast4speed") || url.contains("clock.json")
         || url.contains(".m3u8");
 
-    // Isolated watch_later dir — one file per session, easy to read back
+    // Platform-specific paths
+    #[cfg(unix)]
     let watch_dir = format!("/tmp/nexus-watch-{}", std::process::id());
+    #[cfg(windows)]
+    let watch_dir = format!("{}\\nexus-watch-{}", std::env::var("TEMP").unwrap_or_else(|_| "C:\\Temp".into()), std::process::id());
     let _ = std::fs::create_dir_all(&watch_dir);
 
-    // IPC socket
+    // IPC socket/pipe path
+    #[cfg(unix)]
     let socket = format!("/tmp/nexus-mpv-{}.sock", std::process::id());
+    #[cfg(windows)]
+    let socket = format!("\\\\.\\pipe\\nexus-mpv-{}", std::process::id());
 
     let mut cmd = Command::new("mpv");
     cmd.arg(&url);
@@ -158,6 +164,7 @@ pub fn launch_mpv_tracked(
 
     // Clean up
     let _ = std::fs::remove_dir_all(&watch_dir);
+    #[cfg(unix)]
     let _ = std::fs::remove_file(&socket);
 
     // Notify app with the authoritative final position
@@ -205,25 +212,43 @@ fn read_watch_later(dir: &str) -> Result<(f64, f64)> {
 /// Connects to the IPC socket, subscribes to time-pos and duration changes,
 /// and reads the event stream until the socket closes or stop is signalled.
 /// Sends Position events to the app. Checkpoints to DB every 30 seconds.
-/// One-shot IPC query — returns (time-pos, duration) from mpv socket.
+/// One-shot IPC query — returns (time-pos, duration) from mpv socket/pipe.
 fn ipc_get_position_once(socket: &str) -> Result<(f64, f64)> {
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(socket)
-        .map_err(|e| anyhow!("IPC connect: {e}"))?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
 
     let subscribe = concat!(
         "{\"command\":[\"get_property\",\"time-pos\"]}\n",
         "{\"command\":[\"get_property\",\"duration\"]}\n",
     );
-    stream.write_all(subscribe.as_bytes())?;
 
-    let mut reader = BufReader::new(stream);
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+        let mut stream = UnixStream::connect(socket)
+            .map_err(|e| anyhow!("IPC connect: {e}"))?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+        stream.write_all(subscribe.as_bytes())?;
+        let mut reader = BufReader::new(stream);
+        return parse_two_ipc_responses(&mut reader);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::fs::OpenOptions;
+        let mut f = OpenOptions::new().read(true).write(true).open(socket)
+            .map_err(|e| anyhow!("IPC pipe open: {e}"))?;
+        f.write_all(subscribe.as_bytes())?;
+        let mut reader = BufReader::new(f);
+        return parse_two_ipc_responses(&mut reader);
+    }
+
+    #[allow(unreachable_code)]
+    Err(anyhow!("IPC not supported on this platform"))
+}
+
+fn parse_two_ipc_responses(reader: &mut impl std::io::BufRead) -> Result<(f64, f64)> {
     let mut pos = 0.0f64;
     let mut dur = 0.0f64;
-
     for _ in 0..2 {
         let mut line = String::new();
         if reader.read_line(&mut line).is_ok() {
@@ -233,7 +258,6 @@ fn ipc_get_position_once(socket: &str) -> Result<(f64, f64)> {
             }
         }
     }
-
     Ok((pos, dur))
 }
 
@@ -246,24 +270,52 @@ fn observe_stream(
     last_known: std::sync::Arc<std::sync::Mutex<(f64, f64)>>,
 ) {
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
 
-    // Give mpv time to create the socket
+    // Give mpv time to create the socket/pipe
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Retry connect up to 10 times (mpv may take a moment to start)
-    let mut stream = None;
-    for _ in 0..10 {
-        if stop.try_recv().is_ok() { return; }
-        match UnixStream::connect(socket) {
-            Ok(s) => { stream = Some(s); break; }
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(300)),
-        }
-    }
-    let Some(mut stream) = stream else { return };
+    // ── Platform-specific connection ──────────────────────────────────────────
+    // Returns a Box<dyn Read+Write> so the rest of the function is platform-agnostic.
 
-    // 2s read timeout so we can check stop signal periodically
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    #[cfg(unix)]
+    let connected: Option<Box<dyn ipc_rw::IpcStream>> = {
+        use std::os::unix::net::UnixStream;
+        let mut result = None;
+        for _ in 0..10 {
+            if stop.try_recv().is_ok() { return; }
+            match UnixStream::connect(socket) {
+                Ok(s) => {
+                    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    result = Some(Box::new(s) as Box<dyn ipc_rw::IpcStream>);
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(300)),
+            }
+        }
+        result
+    };
+
+    #[cfg(windows)]
+    let connected: Option<Box<dyn ipc_rw::IpcStream>> = {
+        use std::fs::OpenOptions;
+        let mut result = None;
+        for _ in 0..10 {
+            if stop.try_recv().is_ok() { return; }
+            match OpenOptions::new().read(true).write(true).open(socket) {
+                Ok(f) => {
+                    result = Some(Box::new(f) as Box<dyn ipc_rw::IpcStream>);
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(300)),
+            }
+        }
+        result
+    };
+
+    #[cfg(not(any(unix, windows)))]
+    let connected: Option<Box<dyn ipc_rw::IpcStream>> = None;
+
+    let Some(mut stream) = connected else { return };
 
     // Subscribe to time-pos (id=1) and duration (id=2)
     let subscribe = concat!(
@@ -272,35 +324,24 @@ fn observe_stream(
     );
     if stream.write_all(subscribe.as_bytes()).is_err() { return; }
 
-    let reader_stream = match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let mut reader = BufReader::new(reader_stream);
+    let mut reader = BufReader::new(stream);
 
     let mut cur_pos: f64 = 0.0;
     let mut cur_dur: f64 = 0.0;
     let mut last_checkpoint = std::time::Instant::now();
 
     loop {
-        // Check stop signal
         if stop.try_recv().is_ok() { break; }
 
         let mut line = String::new();
         match reader.read_line(&mut line) {
-            Ok(0) => break,  // EOF — mpv closed the socket
+            Ok(0) => break,
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-                   || e.kind() == std::io::ErrorKind::TimedOut => {
-                // Timeout — just loop and check stop signal
-                continue;
-            }
-            Err(_) => break,  // Real error — mpv likely exited
+                   || e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => break,
         }
 
-        // Parse the event line
-        // {"event":"property-change","id":1,"data":842.5}
-        // {"event":"property-change","id":2,"data":1440.0}
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
             if v["event"] == "property-change" {
                 match v["id"].as_u64() {
@@ -309,14 +350,12 @@ fn observe_stream(
                     _ => {}
                 }
 
-                // Always update last_known so launch_mpv_tracked has fresh data on exit
                 if cur_pos > 0.0 || cur_dur > 0.0 {
                     if let Ok(mut lk) = last_known.lock() {
                         *lk = (cur_pos, cur_dur);
                     }
                 }
 
-                // Send live position update to UI
                 if let Some(ref t) = tx {
                     if cur_pos > 0.0 {
                         let is_checkpoint = last_checkpoint.elapsed().as_secs() >= 30;
@@ -335,6 +374,17 @@ fn observe_stream(
             }
         }
     }
+}
+
+// ── IPC stream trait ──────────────────────────────────────────────────────────
+// Abstracts over UnixStream (Unix) and File/named-pipe (Windows)
+mod ipc_rw {
+    use std::io::{Read, Write};
+    pub trait IpcStream: Read + Write + Send {}
+    #[cfg(unix)]
+    impl IpcStream for std::os::unix::net::UnixStream {}
+    #[cfg(windows)]
+    impl IpcStream for std::fs::File {}
 }
 
 // ── episodes_list ─────────────────────────────────────────────────────────────
