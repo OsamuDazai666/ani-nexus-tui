@@ -359,6 +359,35 @@ impl HistoryStore {
         Ok(recs)
     }
 
+    /// Load only the episode records for the given episode number strings.
+    /// Used for windowed/paginated rendering — avoids loading 1000+ records.
+    pub fn load_episodes_in(&self, anime_id: &str, episode_numbers: &[&str]) -> Result<Vec<EpisodeRecord>> {
+        if episode_numbers.is_empty() { return Ok(vec![]); }
+        let conn = self.conn.lock().unwrap();
+
+        // rusqlite anonymous ? params — one per episode plus one for anime_id
+        let placeholders = episode_numbers.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT anime_id, episode_number, stream_url, watched, watch_timestamp,
+                    position_seconds, duration_seconds, fully_watched
+             FROM episodes WHERE anime_id = ? AND episode_number IN ({placeholders})"
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+
+        // Build a single Vec<Box<dyn ToSql>>: anime_id first, then each episode string
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(anime_id.to_string())];
+        for ep in episode_numbers {
+            params.push(Box::new(ep.to_string()));
+        }
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+        let recs = stmt.query_map(param_refs.as_slice(), row_to_episode)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(recs)
+    }
+
     pub fn get_episode(&self, anime_id: &str, ep: &str) -> Result<Option<EpisodeRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

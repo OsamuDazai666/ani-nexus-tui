@@ -476,7 +476,7 @@ fn draw_detail_gauge(f: &mut Frame, entry: &crate::db::history::HistoryEntry, ar
 
 fn draw_episode_list(
     f: &mut Frame,
-    app: &App,
+    app: &mut App,
     entry: &crate::db::history::HistoryEntry,
     area: Rect,
     focused: bool,
@@ -509,111 +509,199 @@ fn draw_episode_list(
 
     if ep_count == 0 { return; }
 
-    // Each episode row: 1 line tall — no borders
-    let row_h: u16 = 1;
-    let max_visible = inner.height as usize;
-    if max_visible == 0 { return; }
+    // ── Adaptive column count — sync back to app for key navigation ───────────
+    let cols: usize = if inner.width >= 120 { 3 } else { 2 };
+    app.history_ep_cols = cols;
+
+    // Each cell: bordered box — 4 rows tall (2 border + 1 label + 1 bar)
+    let cell_h: u16 = 4;
+    let visible_rows = (inner.height / cell_h) as usize;
+    if visible_rows == 0 { return; }
+    let visible_cells = visible_rows * cols;
+
+    // Cell width — distribute evenly, last col takes remainder
+    let col_w      = inner.width / cols as u16;
+    let last_col_w = inner.width - col_w * (cols as u16 - 1);
 
     let sel_idx = app.history_episode_idx;
-    let start = if sel_idx >= max_visible {
-        sel_idx - (max_visible - 1)
+    let sel_row = sel_idx / cols;
+
+    // Scroll: keep selected row in view
+    let scroll_row = if sel_row >= visible_rows {
+        sel_row - (visible_rows - 1)
     } else {
         0
     };
-
-    // Build a lookup map: episode_number -> EpisodeRecord
-    use std::collections::HashMap;
-    let rec_map: HashMap<&str, &crate::db::history::EpisodeRecord> = app
-        .history_episodes
-        .iter()
-        .map(|r| (r.episode_number.as_str(), r))
-        .collect();
-
+    let start_idx = scroll_row * cols;
     let last_watched = entry.progress.map(|p| p.to_string());
 
-    for slot in 0..max_visible {
-        let list_pos = start + slot;
+    for slot in 0..visible_cells {
+        let list_pos = start_idx + slot;
         if list_pos >= ep_count { break; }
 
-        let ep_str = &app.history_episode_list[list_pos];
-        let rec    = rec_map.get(ep_str.as_str());
-        let sel    = list_pos == sel_idx;
+        let ep_str  = &app.history_episode_list[list_pos].clone();
+        let rec     = app.history_ep_window_records.get(ep_str.as_str());
+        let sel     = list_pos == sel_idx;
+        let is_cur  = last_watched.as_deref() == Some(ep_str.as_str());
 
-        // Status icon
-        let (icon, icon_style) = match rec {
-            Some(r) if r.fully_watched       => ("✓", Style::default().fg(C_GREEN)),
-            Some(r) if r.position_seconds > 5.0 => ("▶", Style::default().fg(C_ACCENT)),
-            _                                => ("·", Style::default().fg(C_DIM)),
-        };
+        let grid_row = slot / cols;
+        let grid_col = slot % cols;
 
-        // Is this the last watched episode?
-        let is_current = last_watched.as_deref() == Some(ep_str.as_str());
+        let cell_x = inner.x + (grid_col as u16 * col_w);
+        let cell_w = if grid_col == cols - 1 { last_col_w } else { col_w };
+        let cell_y = inner.y + (grid_row as u16 * cell_h);
 
-        let ep_label = format!("Ep {ep_str}");
+        if cell_y + cell_h > inner.y + inner.height { break; }
 
-        // Progress info for partially-watched
-        let progress_str = rec.and_then(|r| {
-            if r.position_seconds > 5.0 && !r.fully_watched && r.duration_seconds > 0.0 {
-                Some(format!(" {:.0}%", (r.position_seconds / r.duration_seconds * 100.0)))
-            } else {
-                None
-            }
-        });
+        let cell_bg = if sel { C_BG3 } else { C_BG };
 
-        let row_area = Rect {
-            x: inner.x,
-            y: inner.y + (slot as u16 * row_h),
-            width: inner.width,
-            height: 1,
-        };
-
-        let (row_bg, label_style) = if sel && focused {
-            (C_BG3, Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        // ── Bordered cell ─────────────────────────────────────────────────────
+        let border_style = if sel && focused {
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
         } else if sel {
-            (C_BG3, Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD))
-        } else if is_current {
-            (C_BG, Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD))
+            Style::default().fg(C_TEXT)
+        } else if is_cur {
+            Style::default().fg(Color::Rgb(60, 60, 0))
         } else {
-            (C_BG, Style::default().fg(C_TEXT))
+            Style::default().fg(Color::Rgb(32, 32, 32))
         };
 
-        let mut spans = vec![
-            Span::styled(" ", Style::default().bg(row_bg)),
-            Span::styled(icon, icon_style.bg(row_bg)),
-            Span::styled("  ", Style::default().bg(row_bg)),
-            Span::styled(&ep_label, label_style.bg(row_bg)),
+        let cell_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .style(Style::default().bg(cell_bg));
+
+        let cell_inner = cell_block.inner(Rect { x: cell_x, y: cell_y, width: cell_w, height: cell_h });
+        f.render_widget(cell_block, Rect { x: cell_x, y: cell_y, width: cell_w, height: cell_h });
+
+        // ── Label line ────────────────────────────────────────────────────────
+        let (icon, icon_color) = match rec {
+            Some(r) if r.fully_watched          => ("✓", C_GREEN),
+            Some(r) if r.position_seconds > 5.0 => ("▶", C_ACCENT),
+            _                                    => ("·", C_DIM),
+        };
+
+        let label_style = if sel && focused {
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+        } else if sel || is_cur {
+            Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(C_TEXT)
+        };
+
+        let max_label = (cell_inner.width as usize).saturating_sub(5);
+        let ep_label  = crate::ui::trunc(&format!("Ep {ep_str}"), max_label);
+
+        let mut label_spans = vec![
+            Span::styled(icon, Style::default().fg(icon_color).bg(cell_bg)),
+            Span::styled(" ", Style::default().bg(cell_bg)),
+            Span::styled(ep_label, label_style.bg(cell_bg)),
         ];
 
-        if is_current && !sel {
-            spans.push(Span::styled(" ◀", Style::default().fg(C_ACCENT).bg(row_bg)));
+        if is_cur && !sel {
+            label_spans.push(Span::styled(" ◀", Style::default().fg(C_ACCENT).bg(cell_bg)));
         }
 
-        if let Some(pstr) = progress_str {
-            spans.push(Span::styled(pstr, Style::default().fg(C_DIM).bg(row_bg)));
-        }
-
-        // Resume hint on selected row
+        // Resume timestamp on selected focused cell
         if sel && focused {
-            let rec_pos = rec.map(|r| r.position_seconds).unwrap_or(0.0);
-            if rec_pos > 5.0 {
-                let mins = (rec_pos / 60.0) as u64;
-                let secs = (rec_pos as u64) % 60;
-                spans.push(Span::styled(
-                    format!("  resume {mins}:{secs:02}"),
-                    Style::default().fg(Color::Rgb(50, 50, 0)).bg(row_bg),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    "  [Enter] play",
-                    Style::default().fg(Color::Rgb(50, 50, 0)).bg(row_bg),
+            let pos = rec.map(|r| r.position_seconds).unwrap_or(0.0);
+            if pos > 5.0 {
+                let m = (pos / 60.0) as u64;
+                let s = (pos as u64) % 60;
+                label_spans.push(Span::styled(
+                    format!("  {m}:{s:02}"),
+                    Style::default().fg(Color::Rgb(50, 50, 0)).bg(cell_bg),
                 ));
             }
         }
 
         f.render_widget(
-            Paragraph::new(Line::from(spans))
-                .style(Style::default().bg(row_bg)),
-            row_area,
+            Paragraph::new(Line::from(label_spans)).style(Style::default().bg(cell_bg)),
+            Rect { x: cell_inner.x, y: cell_inner.y, width: cell_inner.width, height: 1 },
         );
+
+        // ── Progress bar line ─────────────────────────────────────────────────
+        let bar_y = cell_inner.y + 1;
+        if bar_y >= inner.y + inner.height { continue; }
+
+        let bar_color = if rec.map(|r| r.fully_watched).unwrap_or(false) {
+            C_GREEN
+        } else {
+            C_ACCENT
+        };
+
+        // Compute pct: ratio if we have duration, positional indicator if not
+        let pct = rec.and_then(|r| {
+            if r.fully_watched {
+                Some(1.0f64)
+            } else if r.duration_seconds > 0.0 && r.position_seconds > 0.0 {
+                Some((r.position_seconds / r.duration_seconds).clamp(0.0, 1.0))
+            } else if r.position_seconds > 0.0 {
+                // No duration stored yet — show bar using 24min typical episode as denominator
+                // Capped at 0.95 so it never looks "done"
+                Some((r.position_seconds / 1440.0).clamp(0.0, 0.95))
+            } else {
+                None
+            }
+        });
+
+        let pct_label = pct.map(|p| format!("{:.0}%", p * 100.0));
+        let pct_w     = pct_label.as_ref().map(|l| l.len() as u16 + 1).unwrap_or(0);
+        let bar_w     = cell_inner.width.saturating_sub(pct_w);
+
+        let bar_line = if let Some(p) = pct {
+            let filled = (p * bar_w as f64).round() as usize;
+            let empty  = (bar_w as usize).saturating_sub(filled);
+            let mut spans = vec![
+                Span::styled(
+                    "█".repeat(filled),
+                    Style::default().fg(bar_color).bg(cell_bg),
+                ),
+                Span::styled(
+                    "░".repeat(empty),
+                    Style::default().fg(Color::Rgb(45, 45, 45)).bg(cell_bg),
+                ),
+            ];
+            if let Some(label) = pct_label {
+                spans.push(Span::styled(
+                    format!(" {label}"),
+                    Style::default().fg(C_DIM).bg(cell_bg),
+                ));
+            }
+            Line::from(spans)
+        } else {
+            // Unwatched — dim empty bar
+            Line::from(Span::styled(
+                "░".repeat(bar_w as usize),
+                Style::default().fg(Color::Rgb(35, 35, 35)).bg(cell_bg),
+            ))
+        };
+
+        f.render_widget(
+            Paragraph::new(bar_line).style(Style::default().bg(cell_bg)),
+            Rect { x: cell_inner.x, y: bar_y, width: cell_inner.width, height: 1 },
+        );
+    }
+
+    // ── Scrollbar ─────────────────────────────────────────────────────────────
+    if ep_count > visible_cells {
+        let total_rows  = (ep_count + cols - 1) / cols;
+        let scroll_max  = total_rows.saturating_sub(visible_rows);
+        let pct         = if scroll_max > 0 { scroll_row as f64 / scroll_max as f64 } else { 0.0 };
+        let track_h     = inner.height.saturating_sub(1);
+        let thumb_y     = inner.y + (pct * track_h as f64) as u16;
+        let track_x     = area.x + area.width.saturating_sub(1);
+
+        for ty in (inner.y)..(inner.y + inner.height) {
+            let (ch, style) = if ty == thumb_y {
+                ("█", Style::default().fg(C_ACCENT))
+            } else {
+                ("│", Style::default().fg(Color::Rgb(35, 35, 35)))
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(ch, style)),
+                Rect { x: track_x, y: ty, width: 1, height: 1 },
+            );
+        }
     }
 }

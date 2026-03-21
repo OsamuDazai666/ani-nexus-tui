@@ -118,28 +118,34 @@ pub fn launch_mpv_tracked(
     ))?;
 
     // ── observe_property stream thread ────────────────────────────────────────
-    // Opens a persistent socket connection and reads property-change events.
-    // Sends PlaybackEvent::Position to the app every ~1s.
-    // Also checkpoints to the DB every 30s to survive crashes.
-
     let socket2   = socket.clone();
     let anime_id2 = anime_id.to_string();
     let episode2  = episode.to_string();
     let tx2       = tx.clone();
     let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
 
+    // Shared last-known position/duration from the observer stream
+    let last_known = std::sync::Arc::new(std::sync::Mutex::new((0.0f64, 0.0f64)));
+    let last_known2 = last_known.clone();
+
     let observer = std::thread::spawn(move || {
-        observe_stream(&socket2, &anime_id2, &episode2, tx2, stop_rx);
+        observe_stream(&socket2, &anime_id2, &episode2, tx2, stop_rx, last_known2);
     });
 
     // ── Wait for mpv ──────────────────────────────────────────────────────────
     let _ = child.wait();
-    let _ = stop_tx.send(());   // Signal observer to exit
+    let _ = stop_tx.send(());
     let _ = observer.join();
 
-    // ── Read authoritative quit position from watch_later file ────────────────
-    let (quit_pos, quit_dur) = read_watch_later(&watch_dir)
-        .unwrap_or((0.0, 0.0));
+    // ── Authoritative quit position: watch_later file (exact) ─────────────────
+    // Duration: from the observer stream (watch_later doesn't store it)
+    let (quit_pos, _) = read_watch_later(&watch_dir).unwrap_or((0.0, 0.0));
+    let (obs_pos, obs_dur) = *last_known.lock().unwrap();
+
+    // Use watch_later position as authoritative (exact to ms),
+    // observer duration as the best duration source
+    let final_pos = if quit_pos > 0.0 { quit_pos } else { obs_pos };
+    let final_dur = obs_dur;
 
     // Clean up
     let _ = std::fs::remove_dir_all(&watch_dir);
@@ -151,13 +157,13 @@ pub fn launch_mpv_tracked(
             let _ = t.send(PlaybackEvent::Finished {
                 anime_id: anime_id.to_string(),
                 episode:  episode.to_string(),
-                position: quit_pos,
-                duration: quit_dur,
+                position: final_pos,
+                duration: final_dur,
             });
         }
     }
 
-    Ok((quit_pos, quit_dur))
+    Ok((final_pos, final_dur))
 }
 
 // ── watch_later reader ────────────────────────────────────────────────────────
@@ -191,11 +197,12 @@ fn read_watch_later(dir: &str) -> Result<(f64, f64)> {
 /// and reads the event stream until the socket closes or stop is signalled.
 /// Sends Position events to the app. Checkpoints to DB every 30 seconds.
 fn observe_stream(
-    socket:   &str,
-    anime_id: &str,
-    episode:  &str,
-    tx:       Option<mpsc::UnboundedSender<PlaybackEvent>>,
-    stop:     std::sync::mpsc::Receiver<()>,
+    socket:     &str,
+    anime_id:   &str,
+    episode:    &str,
+    tx:         Option<mpsc::UnboundedSender<PlaybackEvent>>,
+    stop:       std::sync::mpsc::Receiver<()>,
+    last_known: std::sync::Arc<std::sync::Mutex<(f64, f64)>>,
 ) {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -259,6 +266,13 @@ fn observe_stream(
                     Some(1) => { cur_pos = v["data"].as_f64().unwrap_or(cur_pos); }
                     Some(2) => { cur_dur = v["data"].as_f64().unwrap_or(cur_dur); }
                     _ => {}
+                }
+
+                // Always update last_known so launch_mpv_tracked has fresh data on exit
+                if cur_pos > 0.0 || cur_dur > 0.0 {
+                    if let Ok(mut lk) = last_known.lock() {
+                        *lk = (cur_pos, cur_dur);
+                    }
                 }
 
                 // Send live position update to UI

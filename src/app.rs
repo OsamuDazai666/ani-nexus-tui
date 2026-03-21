@@ -72,6 +72,8 @@ pub enum AppMsg {
     StreamUrl(String),
     EpisodeList { id: String, eps: Vec<String> },
     HistoryEpisodeList { anime_id: String, eps: Vec<String> },
+    /// Windowed episode records loaded from DB
+    EpisodeWindowLoaded { anime_id: String, start: usize, end: usize, records: Vec<EpisodeRecord> },
     /// Request main loop to launch mpv synchronously (terminal-safe)
     LaunchMpv { url: String, anime_id: String, episode: String, resume_from: f64 },
     Playback(PlaybackEvent),
@@ -109,10 +111,14 @@ pub struct App {
     pub history_cover:      Option<ratatui_image::protocol::StatefulProtocol>,
     pub history_cover_id:   Option<String>,
     // Episode list for the selected history entry
-    pub history_episodes:         Vec<EpisodeRecord>,   // DB records (progress/status)
-    pub history_episode_list:     Vec<String>,          // ordered episode strings from cache
-    pub history_episode_idx:      usize,
-    pub history_episodes_loading: bool,
+    pub history_episode_list:      Vec<String>,
+    pub history_episode_idx:       usize,
+    pub history_episodes_loading:  bool,
+    // Virtual scroll window — only records for [window_start..window_end] are in memory
+    pub history_ep_window_start:   usize,
+    pub history_ep_window_end:     usize,
+    pub history_ep_cols:           usize,
+    pub history_ep_window_records: std::collections::HashMap<String, EpisodeRecord>,
 
     // Episode prompt + playback options
     pub episode_input:  String,
@@ -185,10 +191,13 @@ impl App {
             history_filtered: Vec::new(),
             history_cover:    None,
             history_cover_id: None,
-            history_episodes:         Vec::new(),
             history_episode_list:     Vec::new(),
-            history_episode_idx:      0,
-            history_episodes_loading: false,
+            history_episode_idx:       0,
+            history_episodes_loading:  false,
+            history_ep_window_start:   0,
+            history_ep_window_end:     0,
+            history_ep_cols:           2,
+            history_ep_window_records: std::collections::HashMap::new(),
             episode_input:    String::new(),
             episode_cursor:   0,
             stream_mode:      "sub".to_string(),
@@ -234,6 +243,7 @@ impl App {
         if self.active_tab == Tab::History {
             self.load_history_cover();
             self.load_history_episodes();
+            self.load_episode_window();
         }
 
         Ok(())
@@ -330,22 +340,49 @@ impl App {
                 self.pending_mpv = Some((url, anime_id, episode, resume_from));
                 self.needs_redraw = true;
             }
+            AppMsg::EpisodeWindowLoaded { anime_id, start, end, records } => {
+                if self.history_selected().map(|e| e.id == anime_id).unwrap_or(false) {
+                    self.history_ep_window_start = start;
+                    self.history_ep_window_end   = end;
+                    self.history_ep_window_records.clear();
+                    for rec in records {
+                        self.history_ep_window_records.insert(rec.episode_number.clone(), rec);
+                    }
+                }
+            }
+
             AppMsg::HistoryEpisodeList { anime_id, eps } => {
-                // Save to DB cache
                 let _ = self.db.save_episodes_cache(&anime_id, &eps);
-                // Reload the entry so its cache timestamp is fresh
                 if let Ok(Some(updated)) = self.db.get(&anime_id) {
                     if let Some(pos) = self.history.iter().position(|e| e.id == anime_id) {
                         self.history[pos] = updated;
                     }
                 }
-                // Apply if still the selected entry
                 if self.history_selected().map(|e| e.id == anime_id).unwrap_or(false) {
                     self.history_episode_list = eps;
                     self.history_episodes_loading = false;
-                    // Reload episode records from DB
-                    if let Ok(recs) = self.db.load_episodes(&anime_id) {
-                        self.history_episodes = recs;
+                    self.history_ep_window_start = 0;
+                    self.history_ep_window_end   = 0;
+                    self.history_ep_window_records.clear();
+                    self.history_episode_idx = self.last_watched_episode_idx();
+
+                    // Synchronously load the initial window so first render has data
+                    let ep_count = self.history_episode_list.len();
+                    let idx      = self.history_episode_idx;
+                    let start    = idx.saturating_sub(40);
+                    let end      = (idx + 40).min(ep_count);
+                    let window_eps: Vec<&str> = self.history_episode_list
+                        .get(start..end)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect();
+                    if let Ok(recs) = self.db.load_episodes_in(&anime_id, &window_eps) {
+                        self.history_ep_window_start = start;
+                        self.history_ep_window_end   = end;
+                        for rec in recs {
+                            self.history_ep_window_records.insert(rec.episode_number.clone(), rec);
+                        }
                     }
                 }
             }
@@ -353,30 +390,28 @@ impl App {
             AppMsg::Playback(event) => {
                 match event {
                     PlaybackEvent::Position { anime_id, episode, position, duration, checkpoint } => {
-                        // Update in-memory state every ~1s for live UI display
-                        if let Some(rec) = self.history_episodes.iter_mut()
-                            .find(|r| r.anime_id == anime_id && r.episode_number == episode)
-                        {
-                            rec.position_seconds = position;
-                            if duration > 0.0 { rec.duration_seconds = duration; }
-                            rec.fully_watched = duration > 0.0 && position / duration >= 0.95;
+                        // Update in-memory window record for live UI display
+                        if let Some(rec) = self.history_ep_window_records.get_mut(&episode) {
+                            if rec.anime_id == anime_id {
+                                rec.position_seconds = position;
+                                if duration > 0.0 { rec.duration_seconds = duration; }
+                                rec.fully_watched = duration > 0.0 && position / duration >= 0.95;
+                            }
                         }
-                        // Write to DB only on 30s checkpoint (crash safety)
                         if checkpoint {
                             let _ = self.db.update_position(&anime_id, &episode, position, duration);
                         }
                     }
                     PlaybackEvent::Finished { anime_id, episode, position, duration } => {
                         let _ = self.db.update_position(&anime_id, &episode, position, duration);
-                        // Reload full history — entry may be new (played from Anime tab)
                         if let Ok(all) = self.db.load_all() {
                             self.history = all;
                         }
-                        // Refresh episode records if this entry is open in History
+                        // Force window reload for the finished anime
                         if self.history_selected().map(|e| e.id == anime_id).unwrap_or(false) {
-                            if let Ok(recs) = self.db.load_episodes(&anime_id) {
-                                self.history_episodes = recs;
-                            }
+                            self.history_ep_window_start = 0;
+                            self.history_ep_window_end   = 0;
+                            self.history_ep_window_records.clear();
                         }
                         self.toast_success("Playback saved");
                     }
@@ -465,42 +500,59 @@ impl App {
             // Selection changed — clear stale data
             if !self.history_episode_list.is_empty() {
                 self.history_episode_list.clear();
-                self.history_episodes.clear();
+                self.history_ep_window_records.clear();
                 self.history_episode_idx = 0;
+                self.history_ep_window_start = 0;
+                self.history_ep_window_end   = 0;
             }
             return;
         };
 
-        // If we already have the list for this entry and cache is fresh, nothing to do
+        // Detect which anime is currently loaded in the window
+        let loaded_id = self.history_ep_window_records.values().next()
+            .map(|r| r.anime_id.clone());
+
+        // If we already have a fresh list for this entry, nothing to do
         let already_loaded = !self.history_episode_list.is_empty()
-            && self.history_episodes.first()
-                .map(|r| r.anime_id == entry.id)
-                .unwrap_or(false);
+            && loaded_id.as_deref() == Some(entry.id.as_str());
 
         if already_loaded && !entry.episodes_cache_stale() {
             return;
         }
 
-        // If switching to a different anime, reset immediately
-        let switching = self.history_episodes.first()
-            .map(|r| r.anime_id != entry.id)
-            .unwrap_or(true);
+        // Switching to a different anime — reset immediately
+        let switching = loaded_id.as_deref() != Some(entry.id.as_str());
         if switching {
             self.history_episode_list.clear();
-            self.history_episodes.clear();
+            self.history_ep_window_records.clear();
             self.history_episode_idx = 0;
+            self.history_ep_window_start = 0;
+            self.history_ep_window_end   = 0;
 
-            // Load episode records from DB instantly (no API call needed for this)
-            if let Ok(recs) = self.db.load_episodes(&entry.id) {
-                self.history_episodes = recs;
-            }
-
-            // If we have a fresh cache, use it directly
+            // Use cached episode list if fresh
             if let Some(ref cached) = entry.episodes_cache {
                 if !entry.episodes_cache_stale() {
                     self.history_episode_list = cached.clone();
-                    // Jump idx to last watched episode
-                    self.history_episode_idx = self.last_watched_episode_idx();
+                    self.history_episode_idx  = self.last_watched_episode_idx();
+                    // Synchronously load the initial window
+                    let ep_count = self.history_episode_list.len();
+                    let idx      = self.history_episode_idx;
+                    let start    = idx.saturating_sub(40);
+                    let end      = (idx + 40).min(ep_count);
+                    let anime_id = entry.id.clone();
+                    let window_eps: Vec<&str> = self.history_episode_list
+                        .get(start..end)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect();
+                    if let Ok(recs) = self.db.load_episodes_in(&anime_id, &window_eps) {
+                        self.history_ep_window_start = start;
+                        self.history_ep_window_end   = end;
+                        for rec in recs {
+                            self.history_ep_window_records.insert(rec.episode_number.clone(), rec);
+                        }
+                    }
                     return;
                 }
             }
@@ -531,10 +583,63 @@ impl App {
         let Some(entry) = self.history_selected() else { return 0 };
         let Some(progress) = entry.progress else { return 0 };
         let target = progress.to_string();
-        self.history_episode_list
+        let raw = self.history_episode_list
             .iter()
             .position(|ep| ep == &target)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        // In a 2/3-col grid, go back one full row so last watched isn't at the very top
+        raw.saturating_sub(self.history_ep_cols)
+    }
+
+    /// Load episode records for the window around history_episode_idx.
+    /// Window = [idx - 40, idx + 40] clamped to list length.
+    /// Only triggers a DB fetch if the current window doesn't cover idx + 10-row buffer.
+    pub fn load_episode_window(&mut self) {
+        let ep_count = self.history_episode_list.len();
+        if ep_count == 0 { return; }
+
+        let Some(entry) = self.history_selected().cloned() else { return };
+
+        let idx = self.history_episode_idx;
+        let desired_start = idx.saturating_sub(40);
+        let desired_end   = (idx + 40).min(ep_count);
+
+        // Check if the current window already covers the desired range + 10 buffer
+        let cur_start = self.history_ep_window_start;
+        let cur_end   = self.history_ep_window_end;
+
+        let needs_slide = self.history_ep_window_records.is_empty()
+            || desired_start < cur_start.saturating_sub(10)
+            || desired_end   > cur_end + 10;
+
+        if !needs_slide { return; }
+
+        // Collect the episode strings for the window
+        let window_eps: Vec<String> = self.history_episode_list
+            .get(desired_start..desired_end)
+            .unwrap_or(&[])
+            .to_vec();
+
+        if window_eps.is_empty() { return; }
+
+        let tx       = self.msg_tx.clone();
+        let db       = self.db.clone();
+        let anime_id = entry.id.clone();
+
+        tokio::spawn(async move {
+            let ep_refs: Vec<&str> = window_eps.iter().map(|s| s.as_str()).collect();
+            match db.load_episodes_in(&anime_id, &ep_refs) {
+                Ok(records) => {
+                    let _ = tx.send(AppMsg::EpisodeWindowLoaded {
+                        anime_id,
+                        start: desired_start,
+                        end:   desired_end,
+                        records,
+                    });
+                }
+                Err(e) => { let _ = tx.send(AppMsg::Error(format!("ep window: {e}"))); }
+            }
+        });
     }
 
     fn save_debug_image(&self, id: &str) {
@@ -918,8 +1023,10 @@ impl App {
                         self.history_cover = None;
                         self.history_cover_id = None;
                         self.history_episode_list.clear();
-                        self.history_episodes.clear();
+                        self.history_ep_window_records.clear();
                         self.history_episode_idx = 0;
+                        self.history_ep_window_start = 0;
+                        self.history_ep_window_end   = 0;
                         self.history_episodes_loading = false;
                         self.rebuild_history_filter();
                         let new_len = if self.history_filter.is_empty() {
@@ -986,7 +1093,7 @@ impl App {
                         self.history_cover = None;
                         self.history_cover_id = None;
                         self.history_episode_list.clear();
-                        self.history_episodes.clear();
+                        self.history_ep_window_records.clear();
                         self.rebuild_history_filter();
                         self.focus = Focus::History;
                     }
@@ -999,18 +1106,29 @@ impl App {
 
     async fn key_history_episodes(&mut self, key: KeyEvent) -> Result<()> {
         let ep_count = self.history_episode_list.len();
+        let cols     = self.history_ep_cols.max(1);
         match key.code {
-            KeyCode::Left | KeyCode::Esc | KeyCode::Char('h') => {
-                self.focus = Focus::HistoryDetail;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.history_episode_idx > 0 {
+            KeyCode::Left | KeyCode::Char('h') => {
+                // Move left within row, or exit to detail pane if already at col 0
+                if self.history_episode_idx % cols == 0 {
+                    self.focus = Focus::HistoryDetail;
+                } else {
                     self.history_episode_idx -= 1;
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Esc => { self.focus = Focus::HistoryDetail; }
+            KeyCode::Right | KeyCode::Char('l') => {
                 if self.history_episode_idx + 1 < ep_count {
                     self.history_episode_idx += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.history_episode_idx = self.history_episode_idx.saturating_sub(cols);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let next = self.history_episode_idx + cols;
+                if next < ep_count {
+                    self.history_episode_idx = next;
                 }
             }
             KeyCode::Enter | KeyCode::Char('p') => {
@@ -1163,9 +1281,13 @@ impl App {
         self.history_cover = None;
         self.history_cover_id = None;
         self.history_episode_list.clear();
-        self.history_episodes.clear();
+        self.history_ep_window_records.clear();
         self.history_episode_idx = 0;
+                        self.history_ep_window_start = 0;
+                        self.history_ep_window_end   = 0;
         self.history_episodes_loading = false;
+        self.history_ep_window_start = 0;
+        self.history_ep_window_end   = 0;
         self.focus = if tab == Tab::History { Focus::History } else { Focus::Search };
         self.status = format!("{tab}  •  type to search");
     }
