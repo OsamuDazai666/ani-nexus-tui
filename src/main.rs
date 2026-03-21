@@ -85,8 +85,8 @@ async fn run<B: ratatui::backend::Backend>(
         // Run mpv on the main thread — the only way to safely do terminal teardown/restore.
         // pending_mpv is set by handle_msg(LaunchMpv) or handle_msg(StreamUrl).
         if let Some((url, anime_id, episode, resume_from)) = app.pending_mpv.take() {
-            let db = app.db.clone();
-            let tx = app.msg_tx.clone();
+            let db  = app.db.clone();
+            let tx  = app.msg_tx.clone();
 
             // Tear down ratatui before handing terminal to mpv
             crossterm::terminal::disable_raw_mode()?;
@@ -96,8 +96,19 @@ async fn run<B: ratatui::backend::Backend>(
                 crossterm::event::DisableMouseCapture,
             )?;
 
-            let (pos, dur) = player::launch_mpv_tracked(&url, &anime_id, &episode, resume_from, None)
-                .unwrap_or((0.0, 0.0));
+            // Build a PlaybackEvent → AppMsg bridge so the observe stream
+            // can send live position updates back into the app message queue.
+            let (pb_tx, mut pb_rx) = tokio::sync::mpsc::unbounded_channel::<player::PlaybackEvent>();
+            let tx_fwd = tx.clone();
+            tokio::spawn(async move {
+                while let Some(ev) = pb_rx.recv().await {
+                    let _ = tx_fwd.send(AppMsg::Playback(ev));
+                }
+            });
+
+            let (pos, dur) = player::launch_mpv_tracked(
+                &url, &anime_id, &episode, resume_from, Some(pb_tx),
+            ).unwrap_or((0.0, 0.0));
 
             // Restore ratatui
             crossterm::terminal::enable_raw_mode()?;
@@ -107,7 +118,7 @@ async fn run<B: ratatui::backend::Backend>(
                 crossterm::event::EnableMouseCapture,
             )?;
 
-            // Save position and notify app
+            // Save authoritative quit position
             if !anime_id.is_empty() && !episode.is_empty() {
                 let _ = db.update_position(&anime_id, &episode, pos, dur);
                 let _ = tx.send(AppMsg::Playback(player::PlaybackEvent::Finished {

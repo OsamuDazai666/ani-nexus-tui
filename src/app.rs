@@ -352,23 +352,27 @@ impl App {
 
             AppMsg::Playback(event) => {
                 match event {
-                    PlaybackEvent::Position { anime_id, episode, position, duration } => {
-                        let _ = self.db.update_position(&anime_id, &episode, position, duration);
-                        // Refresh episode records if this is the open history entry
-                        if self.history_selected().map(|e| e.id == anime_id).unwrap_or(false) {
-                            if let Ok(recs) = self.db.load_episodes(&anime_id) {
-                                self.history_episodes = recs;
-                            }
+                    PlaybackEvent::Position { anime_id, episode, position, duration, checkpoint } => {
+                        // Update in-memory state every ~1s for live UI display
+                        if let Some(rec) = self.history_episodes.iter_mut()
+                            .find(|r| r.anime_id == anime_id && r.episode_number == episode)
+                        {
+                            rec.position_seconds = position;
+                            if duration > 0.0 { rec.duration_seconds = duration; }
+                            rec.fully_watched = duration > 0.0 && position / duration >= 0.95;
+                        }
+                        // Write to DB only on 30s checkpoint (crash safety)
+                        if checkpoint {
+                            let _ = self.db.update_position(&anime_id, &episode, position, duration);
                         }
                     }
                     PlaybackEvent::Finished { anime_id, episode, position, duration } => {
                         let _ = self.db.update_position(&anime_id, &episode, position, duration);
-                        // Refresh history entry and episode list
-                        if let Ok(Some(updated)) = self.db.get(&anime_id) {
-                            if let Some(pos) = self.history.iter().position(|e| e.id == anime_id) {
-                                self.history[pos] = updated;
-                            }
+                        // Reload full history — entry may be new (played from Anime tab)
+                        if let Ok(all) = self.db.load_all() {
+                            self.history = all;
                         }
+                        // Refresh episode records if this entry is open in History
                         if self.history_selected().map(|e| e.id == anime_id).unwrap_or(false) {
                             if let Ok(recs) = self.db.load_episodes(&anime_id) {
                                 self.history_episodes = recs;
@@ -1395,9 +1399,10 @@ impl App {
                     tokio::spawn(async move {
                         match player::stream_anime(&id, ep, &mode, &quality).await {
                             Ok(url) => {
+                                // Save anime to history
                                 let entry = HistoryEntry::from_content(&item);
                                 let _ = db.save(&entry);
-                                // Save episode stream URL in the episodes table
+                                // Save episode record
                                 let rec = crate::db::history::EpisodeRecord {
                                     anime_id:         entry.id.clone(),
                                     episode_number:   ep.to_string(),
@@ -1409,7 +1414,15 @@ impl App {
                                     fully_watched:    false,
                                 };
                                 let _ = db.save_episode(&rec);
-                                let _ = tx.send(AppMsg::StreamUrl(url));
+                                // Use LaunchMpv so tracking works (anime_id + episode filled in)
+                                let ep_num = ep;
+                                let _ = db.update_progress(&entry.id, ep_num);
+                                let _ = tx.send(AppMsg::LaunchMpv {
+                                    url,
+                                    anime_id: entry.id,
+                                    episode:  ep.to_string(),
+                                    resume_from: 0.0,
+                                });
                             }
                             Err(e) => { let _ = tx.send(AppMsg::Error(e.to_string())); }
                         }

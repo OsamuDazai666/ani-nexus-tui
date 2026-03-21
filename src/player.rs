@@ -1,4 +1,5 @@
-//! Stream resolution + mpv launcher with IPC position tracking.
+//! Stream resolution + mpv launcher with IPC observe_property tracking
+//! and watch_later-based exact quit-position saving.
 
 use anyhow::{anyhow, bail, Result};
 use std::process::Command;
@@ -9,15 +10,18 @@ const ALLANIME_BASE: &str = "allanime.day";
 const ALLANIME_REFR: &str = "https://allmanga.to";
 const AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0";
 
-/// Sent back to App after mpv exits or on each position checkpoint.
+// ── Public event type ─────────────────────────────────────────────────────────
+
+/// Sent back to App during and after playback.
 pub enum PlaybackEvent {
-    /// Position checkpoint — save to DB. (anime_id, episode, position, duration)
-    Position { anime_id: String, episode: String, position: f64, duration: f64 },
-    /// mpv exited. (anime_id, episode, final_position, duration)
+    /// Live position update from observe_property stream (~1s granularity).
+    /// `checkpoint=true` means write to DB now (every 30s).
+    Position { anime_id: String, episode: String, position: f64, duration: f64, checkpoint: bool },
+    /// mpv exited — position is the authoritative value read from watch_later file.
     Finished { anime_id: String, episode: String, position: f64, duration: f64 },
 }
 
-// ── ani-cli hex cipher ───────────────────────────────────────────────────────
+// ── ani-cli hex cipher ────────────────────────────────────────────────────────
 
 fn hex_decipher(s: &str) -> String {
     let pairs: Vec<&str> = (0..s.len()).step_by(2)
@@ -55,14 +59,17 @@ pub async fn fetch_episode_list(show_id: &str, mode: &str) -> Result<Vec<String>
     episodes_list(show_id, mode).await
 }
 
-/// Launch mpv, block until it exits, return final position + duration.
-/// `resume_from` is passed as `--start=<seconds>` if > 5.0.
+/// Simple fire-and-forget launch (no tracking). Used as a thin wrapper.
 pub fn launch_mpv_url(url: &str) -> Result<()> {
-    launch_mpv_tracked(url, "", "", 0.0, None)
-        .map(|_| ())
+    launch_mpv_tracked(url, "", "", 0.0, None).map(|_| ())
 }
 
-/// Full tracked launch — sends PlaybackEvents via `tx` and returns (position, duration).
+/// Launch mpv with full tracking:
+/// - `--save-position-on-quit` into an isolated tmp dir → exact quit position
+/// - `observe_property` event stream → live position updates (~1s)
+///
+/// The caller (main loop) is responsible for terminal teardown before calling
+/// this and restore afterwards. Returns `(quit_position_seconds, duration_seconds)`.
 pub fn launch_mpv_tracked(
     url:         &str,
     anime_id:    &str,
@@ -76,164 +83,203 @@ pub fn launch_mpv_tracked(
     let needs_referer = url.contains("fast4speed") || url.contains("clock.json")
         || url.contains(".m3u8");
 
-    // IPC socket path — unique per session to avoid collisions
-    let socket = format!("/tmp/nexus-mpv-{}.sock", std::process::id());
+    // Isolated watch_later dir — one file per session, easy to read back
+    let watch_dir = format!("/tmp/nexus-watch-{}", std::process::id());
+    let _ = std::fs::create_dir_all(&watch_dir);
 
-    // Caller (main loop) is responsible for terminal teardown before calling this
-    // and restore after it returns.
+    // IPC socket
+    let socket = format!("/tmp/nexus-mpv-{}.sock", std::process::id());
 
     let mut cmd = Command::new("mpv");
     cmd.arg(&url);
+
+    // Position tracking
+    cmd.arg("--save-position-on-quit");
+    cmd.arg(format!("--watch-later-dir={watch_dir}"));
+    cmd.arg("--watch-later-options=start");   // only save start position, not other state
+
+    // IPC for live observe_property stream
     cmd.arg(format!("--input-ipc-server={socket}"));
     cmd.arg("--idle=no");
+
+    // HTTP headers
     cmd.arg(format!("--http-header-fields-append=User-Agent: {AGENT}"));
     if needs_referer {
         cmd.arg(format!("--http-header-fields-append=Referer: {ALLANIME_REFR}"));
     }
+
+    // Resume from saved position
     if resume_from > 5.0 {
         cmd.arg(format!("--start={resume_from:.1}"));
     }
 
-    // Spawn — don't wait yet; start the IPC poller in parallel
     let mut child = cmd.spawn().map_err(|e| anyhow!(
         "Failed to launch mpv: {e}\nInstall: sudo apt install mpv"
     ))?;
 
-    // IPC position poller — runs in background, checkpoints every 30s
-    let socket2    = socket.clone();
-    let anime_id2  = anime_id.to_string();
-    let episode2   = episode.to_string();
-    let tx2        = tx.clone();
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    // ── observe_property stream thread ────────────────────────────────────────
+    // Opens a persistent socket connection and reads property-change events.
+    // Sends PlaybackEvent::Position to the app every ~1s.
+    // Also checkpoints to the DB every 30s to survive crashes.
 
-    let _poller = std::thread::spawn(move || {
-        ipc_poller(&socket2, &anime_id2, &episode2, tx2, done_rx);
+    let socket2   = socket.clone();
+    let anime_id2 = anime_id.to_string();
+    let episode2  = episode.to_string();
+    let tx2       = tx.clone();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+
+    let observer = std::thread::spawn(move || {
+        observe_stream(&socket2, &anime_id2, &episode2, tx2, stop_rx);
     });
 
-    // Wait for mpv to exit
+    // ── Wait for mpv ──────────────────────────────────────────────────────────
     let _ = child.wait();
-    let _ = done_tx.send(());   // Signal poller to stop
+    let _ = stop_tx.send(());   // Signal observer to exit
+    let _ = observer.join();
 
-    // Read final position from socket (best effort)
-    let (final_pos, final_dur) = ipc_get_position_once(&socket)
+    // ── Read authoritative quit position from watch_later file ────────────────
+    let (quit_pos, quit_dur) = read_watch_later(&watch_dir)
         .unwrap_or((0.0, 0.0));
 
-    // Send Finished event
+    // Clean up
+    let _ = std::fs::remove_dir_all(&watch_dir);
+    let _ = std::fs::remove_file(&socket);
+
+    // Notify app with the authoritative final position
     if !anime_id.is_empty() {
         if let Some(ref t) = tx {
             let _ = t.send(PlaybackEvent::Finished {
                 anime_id: anime_id.to_string(),
                 episode:  episode.to_string(),
-                position: final_pos,
-                duration: final_dur,
+                position: quit_pos,
+                duration: quit_dur,
             });
         }
     }
 
-    // Clean up socket
-    let _ = std::fs::remove_file(&socket);
-
-    Ok((final_pos, final_dur))
+    Ok((quit_pos, quit_dur))
 }
 
-// ── IPC helpers ───────────────────────────────────────────────────────────────
+// ── watch_later reader ────────────────────────────────────────────────────────
 
-/// Poll mpv via Unix socket every 30s, send Position events.
-fn ipc_poller(
+/// Read `start=<seconds>` from the single file mpv writes in watch_later_dir.
+/// mpv names the file after an MD5 hash of the URL so we just grab whatever
+/// file is in the dir — there will be exactly one (or zero if the episode
+/// was less than a few seconds in).
+fn read_watch_later(dir: &str) -> Result<(f64, f64)> {
+    let entry = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().is_file())
+        .ok_or_else(|| anyhow!("no watch_later file"))?;
+
+    let content = std::fs::read_to_string(entry.path())?;
+
+    // Format: one key=value per line, e.g.:
+    //   start=842.123000
+    //   volume=100
+    let pos = content.lines()
+        .find(|l| l.starts_with("start="))
+        .and_then(|l| l["start=".len()..].trim().parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    Ok((pos, 0.0))   // watch_later doesn't store duration; we already have it in DB
+}
+
+// ── observe_property stream ───────────────────────────────────────────────────
+
+/// Connects to the IPC socket, subscribes to time-pos and duration changes,
+/// and reads the event stream until the socket closes or stop is signalled.
+/// Sends Position events to the app. Checkpoints to DB every 30 seconds.
+fn observe_stream(
     socket:   &str,
     anime_id: &str,
     episode:  &str,
     tx:       Option<mpsc::UnboundedSender<PlaybackEvent>>,
-    done:     std::sync::mpsc::Receiver<()>,
+    stop:     std::sync::mpsc::Receiver<()>,
 ) {
-    // Give mpv a moment to create the socket
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    // Give mpv time to create the socket
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Retry connect up to 10 times (mpv may take a moment to start)
+    let mut stream = None;
+    for _ in 0..10 {
+        if stop.try_recv().is_ok() { return; }
+        match UnixStream::connect(socket) {
+            Ok(s) => { stream = Some(s); break; }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(300)),
+        }
+    }
+    let Some(mut stream) = stream else { return };
+
+    // 2s read timeout so we can check stop signal periodically
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+
+    // Subscribe to time-pos (id=1) and duration (id=2)
+    let subscribe = concat!(
+        "{\"command\":[\"observe_property\",1,\"time-pos\"]}\n",
+        "{\"command\":[\"observe_property\",2,\"duration\"]}\n",
+    );
+    if stream.write_all(subscribe.as_bytes()).is_err() { return; }
+
+    let reader_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut reader = BufReader::new(reader_stream);
+
+    let mut cur_pos: f64 = 0.0;
+    let mut cur_dur: f64 = 0.0;
+    let mut last_checkpoint = std::time::Instant::now();
 
     loop {
-        // Check if we've been asked to stop
-        if done.try_recv().is_ok() { break; }
+        // Check stop signal
+        if stop.try_recv().is_ok() { break; }
 
-        if let Ok((pos, dur)) = ipc_get_position_once(socket) {
-            if !anime_id.is_empty() {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,  // EOF — mpv closed the socket
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                   || e.kind() == std::io::ErrorKind::TimedOut => {
+                // Timeout — just loop and check stop signal
+                continue;
+            }
+            Err(_) => break,  // Real error — mpv likely exited
+        }
+
+        // Parse the event line
+        // {"event":"property-change","id":1,"data":842.5}
+        // {"event":"property-change","id":2,"data":1440.0}
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+            if v["event"] == "property-change" {
+                match v["id"].as_u64() {
+                    Some(1) => { cur_pos = v["data"].as_f64().unwrap_or(cur_pos); }
+                    Some(2) => { cur_dur = v["data"].as_f64().unwrap_or(cur_dur); }
+                    _ => {}
+                }
+
+                // Send live position update to UI
                 if let Some(ref t) = tx {
-                    let _ = t.send(PlaybackEvent::Position {
-                        anime_id: anime_id.to_string(),
-                        episode:  episode.to_string(),
-                        position: pos,
-                        duration: dur,
-                    });
+                    if cur_pos > 0.0 {
+                        let is_checkpoint = last_checkpoint.elapsed().as_secs() >= 30;
+                        let _ = t.send(PlaybackEvent::Position {
+                            anime_id:   anime_id.to_string(),
+                            episode:    episode.to_string(),
+                            position:   cur_pos,
+                            duration:   cur_dur,
+                            checkpoint: is_checkpoint,
+                        });
+                        if is_checkpoint {
+                            last_checkpoint = std::time::Instant::now();
+                        }
+                    }
                 }
             }
         }
-
-        // Sleep 30s but wake up early if done signal arrives
-        for _ in 0..300 {
-            if done.try_recv().is_ok() { return; }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
     }
-}
-
-/// Send a single IPC command to mpv and read back position + duration.
-fn ipc_get_position_once(socket: &str) -> Result<(f64, f64)> {
-    use std::io::Write;
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(socket)
-        .map_err(|e| anyhow!("IPC connect: {e}"))?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
-
-    // Request time-pos
-    stream.write_all(b"{\"command\":[\"get_property\",\"time-pos\"]}\n")?;
-    let pos = read_ipc_number(&mut stream).unwrap_or(0.0);
-
-    // Request duration
-    stream.write_all(b"{\"command\":[\"get_property\",\"duration\"]}\n")?;
-    let dur = read_ipc_number(&mut stream).unwrap_or(0.0);
-
-    Ok((pos, dur))
-}
-
-fn read_ipc_number(stream: &mut std::os::unix::net::UnixStream) -> Option<f64> {
-    use std::io::Read;
-    let mut buf = [0u8; 256];
-    let n = stream.read(&mut buf).ok()?;
-    let s = std::str::from_utf8(&buf[..n]).ok()?;
-    // Response: {"data":<number>,"error":"success","request_id":0}
-    let v: serde_json::Value = serde_json::from_str(s.lines().next()?).ok()?;
-    v["data"].as_f64()
-}
-
-// ── ani-cli delegation ────────────────────────────────────────────────────────
-
-async fn stream_via_ani_cli(title: &str, episode: u32, mode: &str, quality: &str) -> Result<String> {
-    let mut args = vec![
-        "-e".to_string(), episode.to_string(),
-        "-q".to_string(), quality.to_string(),
-        title.to_string(),
-    ];
-    if mode == "dub" { args.push("--dub".to_string()); }
-
-    let out = tokio::process::Command::new("ani-cli")
-        .args(&args)
-        .env("ANI_CLI_PLAYER", "debug")
-        .output().await
-        .map_err(|e| anyhow!("ani-cli exec: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let all = format!("{stdout}{stderr}");
-
-    if let Some(pos) = all.find("Selected link:") {
-        if let Some(url) = all[pos..].lines().nth(1) {
-            let url = url.trim().to_string();
-            if url.starts_with("http") { return Ok(url); }
-        }
-    }
-    if let Some(url) = all.lines().find(|l| l.trim().starts_with("http")) {
-        return Ok(url.trim().to_string());
-    }
-    bail!("ani-cli returned no URL.\nOutput:\n{}", &all[..all.len().min(500)])
 }
 
 // ── episodes_list ─────────────────────────────────────────────────────────────
@@ -305,19 +351,14 @@ async fn get_episode_url(id: &str, ep: u32, mode: &str, quality: &str) -> Result
 
     while let Some(res) = set.join_next().await {
         if let Ok(Ok(links)) = res {
-            if !links.is_empty() {
-                all_links.extend(links);
-                break;
-            }
+            if !links.is_empty() { all_links.extend(links); break; }
         }
     }
 
     if all_links.is_empty() {
         bail!(
-            "No playable links found for episode {ep}.\n\
-             Providers tried: {}\n\
-             Install ani-cli for best compatibility:\n\
-             sudo apt install ani-cli",
+            "No playable links found for episode {ep}.\nProviders tried: {}\n\
+             Install ani-cli for best compatibility:\nsudo apt install ani-cli",
             providers.iter().map(|(n,_)| n.as_str()).collect::<Vec<_>>().join(", ")
         );
     }
@@ -424,11 +465,8 @@ async fn parse_master_m3u8(
                 .map(|h| format!("{h}p"))
                 .unwrap_or_else(|| "unknown".to_string());
         } else if !line.starts_with('#') && !line.is_empty() {
-            let full_url = if line.starts_with("http") {
-                line.to_string()
-            } else {
-                format!("{base}{line}")
-            };
+            let full_url = if line.starts_with("http") { line.to_string() }
+                           else { format!("{base}{line}") };
             links.push((current_res.clone(), full_url, refr.map(String::from)));
         }
     }
@@ -457,8 +495,7 @@ fn expand_wixmp(url: &str) -> Vec<(String, String, Option<String>)> {
                     let clean_base = base_path
                         .trim_start_matches("https://")
                         .trim_start_matches("http://");
-                    let u = format!("https://{clean_base}/{r}{suffix}");
-                    (r.to_string(), u, None)
+                    (r.to_string(), format!("https://{clean_base}/{r}{suffix}"), None)
                 })
                 .collect();
         }
