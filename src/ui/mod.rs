@@ -111,7 +111,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         cols[1],
     );
 
-    search::draw_search_bar(f, app, cols[2]);
+    if app.active_tab == Tab::Anime {
+        search::draw_search_bar(f, app, cols[2]);
+    }
 }
 
 // ── Body ──────────────────────────────────────────────────────────────────────

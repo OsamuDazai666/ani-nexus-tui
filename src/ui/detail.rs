@@ -173,11 +173,6 @@ pub fn draw_episode_grid(f: &mut Frame, app: &mut App, area: Rect) {
     // Sync to app so the key handler uses the exact same column count as the rendered grid
     app.episode_cols = cols_per_row;
 
-    let watched: std::collections::HashSet<String> = app.history.iter()
-        .filter(|e| app.selected.as_ref().map(|s| s.id() == e.id).unwrap_or(false))
-        .filter_map(|e| e.progress.map(|p| p.to_string()))
-        .collect();
-
     let current_ep = app.episode_input.trim().to_string();
 
     let mut grid_lines: Vec<Line> = Vec::new();
@@ -191,19 +186,99 @@ pub fn draw_episode_grid(f: &mut Frame, app: &mut App, area: Rect) {
             let mut spans: Vec<Span> = vec![Span::raw(" ")];
             for ep in chunk {
                 let is_selected = ep == &current_ep;
-                let is_watched  = watched.contains(ep);
+                let rec = app.anime_episode_records.get(ep.as_str());
 
+                // Compute progress fraction (0.0–1.0)
+                let pct = rec.and_then(|r| {
+                    if r.fully_watched { Some(1.0f64) }
+                    else if r.duration_seconds > 0.0 && r.position_seconds > 0.0 {
+                        Some((r.position_seconds / r.duration_seconds).clamp(0.0, 1.0))
+                    } else if r.position_seconds > 0.0 {
+                        Some((r.position_seconds / 1440.0).clamp(0.0, 0.95))
+                    } else { None }
+                });
+
+                // Cell is " 123 " = 5 chars wide
+                let cell_w = 5usize;
                 let ep_display = format!(" {:>3} ", ep);
-                let style = if is_selected && focused {
-                    Style::default().fg(Color::Rgb(0,0,0)).bg(C_ACCENT).add_modifier(Modifier::BOLD)
-                } else if is_selected && !focused {
-                    Style::default().fg(C_TEXT).bg(Color::Rgb(60,60,60)).add_modifier(Modifier::BOLD)
-                } else if is_watched {
-                    Style::default().fg(Color::Rgb(45,45,45)).bg(Color::Rgb(18,18,18))
+
+                // Fill color: ≥90% → teal (watched), <90% → yellow (in-progress)
+                // Each has a normal shade and a brighter shade for when selected
+                let (fill_bg_normal, fill_bg_bright) = if pct.map(|p| p >= 0.90).unwrap_or(false) {
+                    (Color::Rgb(0, 160, 120), Color::Rgb(0, 200, 155))   // teal
                 } else {
-                    Style::default().fg(Color::Rgb(180,180,180)).bg(Color::Rgb(28,28,28))
+                    (Color::Rgb(160, 130, 0), Color::Rgb(200, 165, 0))   // yellow
                 };
-                spans.push(Span::styled(ep_display, style));
+
+                let empty_bg = Color::Rgb(28, 28, 28);
+                let empty_fg = Color::Rgb(90, 90, 90);
+                let fill_fg  = Color::Rgb(0, 0, 0);
+
+                if is_selected && focused {
+                    if let Some(p) = pct {
+                        // Cursor on a progress cell:
+                        // Filled part: bright fill + WHITE text (not black) so cursor pops
+                        // Unfilled part: bright white bg to clearly show cursor boundary
+                        let filled_chars = (p * cell_w as f64).round() as usize;
+                        let filled_chars = filled_chars.min(cell_w);
+                        let chars: Vec<char> = ep_display.chars().collect();
+                        let filled_str: String = chars[..filled_chars].iter().collect();
+                        let empty_str:  String = chars[filled_chars..].iter().collect();
+                        if !filled_str.is_empty() {
+                            spans.push(Span::styled(
+                                filled_str,
+                                // White text on bright fill — high contrast vs dim non-selected cells
+                                Style::default().fg(Color::Rgb(255,255,255)).bg(fill_bg_bright).add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                        if !empty_str.is_empty() {
+                            // Bright white background for unfilled portion — cursor is always visible
+                            spans.push(Span::styled(
+                                empty_str,
+                                Style::default().fg(Color::Rgb(0,0,0)).bg(Color::Rgb(220,220,220)).add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                    } else {
+                        // Selected, no progress — solid accent
+                        spans.push(Span::styled(
+                            ep_display,
+                            Style::default().fg(Color::Rgb(0,0,0)).bg(C_ACCENT).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                } else if is_selected {
+                    // Selected but not focused
+                    spans.push(Span::styled(
+                        ep_display,
+                        Style::default().fg(C_TEXT).bg(Color::Rgb(60,60,60)).add_modifier(Modifier::BOLD),
+                    ));
+                } else if let Some(p) = pct {
+                    // Has progress — split cell into filled and unfilled
+                    let filled_chars = (p * cell_w as f64).round() as usize;
+                    let filled_chars = filled_chars.min(cell_w);
+
+                    let chars: Vec<char> = ep_display.chars().collect();
+                    let filled_str: String = chars[..filled_chars].iter().collect();
+                    let empty_str:  String = chars[filled_chars..].iter().collect();
+
+                    if !filled_str.is_empty() {
+                        spans.push(Span::styled(
+                            filled_str,
+                            Style::default().fg(fill_fg).bg(fill_bg_normal),
+                        ));
+                    }
+                    if !empty_str.is_empty() {
+                        spans.push(Span::styled(
+                            empty_str,
+                            Style::default().fg(empty_fg).bg(empty_bg),
+                        ));
+                    }
+                } else {
+                    // Unwatched
+                    spans.push(Span::styled(
+                        ep_display,
+                        Style::default().fg(Color::Rgb(180,180,180)).bg(Color::Rgb(28,28,28)),
+                    ));
+                }
                 spans.push(Span::styled(" ", Style::default().bg(C_PANEL)));
             }
             grid_lines.push(Line::from(spans));

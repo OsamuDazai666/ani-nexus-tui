@@ -72,6 +72,7 @@ pub enum AppMsg {
     StreamUrl(String),
     EpisodeList { id: String, eps: Vec<String> },
     HistoryEpisodeList { anime_id: String, eps: Vec<String> },
+    AnimeEpisodeRecords { anime_id: String, records: Vec<EpisodeRecord> },
     /// Windowed episode records loaded from DB
     EpisodeWindowLoaded { anime_id: String, start: usize, end: usize, records: Vec<EpisodeRecord> },
     /// Request main loop to launch mpv synchronously (terminal-safe)
@@ -102,6 +103,8 @@ pub struct App {
     // Detail
     pub selected:     Option<ContentItem>,
     pub detail_scroll: u16,
+    /// Per-episode DB records for the currently selected anime (Anime tab progress display)
+    pub anime_episode_records: std::collections::HashMap<String, EpisodeRecord>,
 
     // History
     pub history:            Vec<HistoryEntry>,
@@ -185,6 +188,7 @@ impl App {
             has_more:      false,
             selected:      None,
             detail_scroll: 0,
+            anime_episode_records: std::collections::HashMap::new(),
             history,
             history_idx:   0,
             history_filter:   String::new(),
@@ -351,6 +355,16 @@ impl App {
                 }
             }
 
+            AppMsg::AnimeEpisodeRecords { anime_id, records } => {
+                // Only apply if this anime is still selected
+                if self.selected.as_ref().map(|s| s.id() == anime_id).unwrap_or(false) {
+                    self.anime_episode_records.clear();
+                    for rec in records {
+                        self.anime_episode_records.insert(rec.episode_number.clone(), rec);
+                    }
+                }
+            }
+
             AppMsg::HistoryEpisodeList { anime_id, eps } => {
                 let _ = self.db.save_episodes_cache(&anime_id, &eps);
                 if let Ok(Some(updated)) = self.db.get(&anime_id) {
@@ -390,20 +404,54 @@ impl App {
             AppMsg::Playback(event) => {
                 match event {
                     PlaybackEvent::Position { anime_id, episode, position, duration, checkpoint } => {
-                        // Update in-memory window record for live UI display
+                        let fully = duration > 0.0 && position / duration >= 0.95;
+                        // Update history window records (History tab live display)
                         if let Some(rec) = self.history_ep_window_records.get_mut(&episode) {
                             if rec.anime_id == anime_id {
                                 rec.position_seconds = position;
                                 if duration > 0.0 { rec.duration_seconds = duration; }
-                                rec.fully_watched = duration > 0.0 && position / duration >= 0.95;
+                                rec.fully_watched = fully;
                             }
                         }
+                        // Update anime episode records (Anime tab live display)
+                        let rec = self.anime_episode_records.entry(episode.clone())
+                            .or_insert_with(|| crate::db::history::EpisodeRecord {
+                                anime_id:         anime_id.clone(),
+                                episode_number:   episode.clone(),
+                                stream_url:       None,
+                                watched:          true,
+                                watch_timestamp:  None,
+                                position_seconds: 0.0,
+                                duration_seconds: 0.0,
+                                fully_watched:    false,
+                            });
+                        rec.position_seconds = position;
+                        if duration > 0.0 { rec.duration_seconds = duration; }
+                        rec.fully_watched = fully;
+
                         if checkpoint {
                             let _ = self.db.update_position(&anime_id, &episode, position, duration);
                         }
                     }
                     PlaybackEvent::Finished { anime_id, episode, position, duration } => {
                         let _ = self.db.update_position(&anime_id, &episode, position, duration);
+                        // Update anime_episode_records with final position
+                        let fully = duration > 0.0 && position / duration >= 0.95;
+                        let rec = self.anime_episode_records.entry(episode.clone())
+                            .or_insert_with(|| crate::db::history::EpisodeRecord {
+                                anime_id:         anime_id.clone(),
+                                episode_number:   episode.clone(),
+                                stream_url:       None,
+                                watched:          true,
+                                watch_timestamp:  None,
+                                position_seconds: 0.0,
+                                duration_seconds: 0.0,
+                                fully_watched:    false,
+                            });
+                        rec.position_seconds = position;
+                        if duration > 0.0 { rec.duration_seconds = duration; }
+                        rec.fully_watched = fully;
+
                         if let Ok(all) = self.db.load_all() {
                             self.history = all;
                         }
@@ -1271,6 +1319,7 @@ impl App {
         self.selected    = None;
         self.cover_protocol = None;
         self.episode_list.clear();
+        self.anime_episode_records.clear();
         self.search_input.clear();
         self.search_cursor = 0;
         self.current_page = 1;
@@ -1430,6 +1479,19 @@ impl App {
         }
 
         let _ = self.msg_tx.send(AppMsg::DetailLoaded(item));
+
+        // ── Load per-episode progress from DB for the progress fill display ───
+        self.anime_episode_records.clear();
+        let db  = self.db.clone();
+        let tx  = self.msg_tx.clone();
+        let aid = item_id.clone();
+        tokio::spawn(async move {
+            if let Ok(recs) = db.load_episodes(&aid) {
+                if !recs.is_empty() {
+                    let _ = tx.send(AppMsg::AnimeEpisodeRecords { anime_id: aid, records: recs });
+                }
+            }
+        });
     }
 
     // ── Playback ──────────────────────────────────────────────────────────────
@@ -1517,7 +1579,22 @@ impl App {
                     let id = match &item {
                         ContentItem::Anime(a) => a.id.clone(),
                     };
-                    self.toast_info(format!("Fetching ep {ep} [{mode}]…"));
+
+                    // Look up resume position from cached episode records
+                    let resume_from = self.anime_episode_records
+                        .get(&ep_str)
+                        .filter(|r| !r.fully_watched && r.position_seconds > 5.0)
+                        .map(|r| r.position_seconds)
+                        .unwrap_or(0.0);
+
+                    if resume_from > 5.0 {
+                        let mins = (resume_from / 60.0) as u64;
+                        let secs = (resume_from as u64) % 60;
+                        self.toast_info(format!("Resuming Ep {ep} from {mins}:{secs:02}…"));
+                    } else {
+                        self.toast_info(format!("Fetching ep {ep} [{mode}]…"));
+                    }
+
                     tokio::spawn(async move {
                         match player::stream_anime(&id, ep, &mode, &quality).await {
                             Ok(url) => {
@@ -1543,7 +1620,7 @@ impl App {
                                     url,
                                     anime_id: entry.id,
                                     episode:  ep.to_string(),
-                                    resume_from: 0.0,
+                                    resume_from,
                                 });
                             }
                             Err(e) => { let _ = tx.send(AppMsg::Error(e.to_string())); }
