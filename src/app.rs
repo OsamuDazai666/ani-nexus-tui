@@ -1398,6 +1398,7 @@ impl App {
                         self.stream_mode    = self.config.player.stream_mode.clone();
                         self.stream_quality = self.config.player.quality.clone();
                         self.settings_color_idx = [0, 0, 0];
+                        let _ = self.config.save();
                         self.toast_success("Settings reset to defaults");
                     }
                     (1, row @ 0..=2) => {
@@ -1493,6 +1494,7 @@ impl App {
             }
             _ => {}
         }
+        let _ = self.config.save();
     }
 
     fn settings_cycle_back(&mut self) {
@@ -1598,6 +1600,7 @@ impl App {
             self.settings_editing = false;
             self.settings_input.clear();
             self.settings_error = None;
+            let _ = self.config.save();  // persist immediately
             true
         } else {
             self.settings_error = Some("✗ invalid — use #rrggbb or r,g,b".into());
@@ -1615,7 +1618,7 @@ impl App {
         let custom_idx = idx - n_presets;
         let deleted    = self.color_customs_mut(row).remove(custom_idx);
 
-        // If the deleted color was the active one, fall back to previous preset
+        // If the deleted color was the active one, fall back to first preset
         if self.color_active_mut(row) == &deleted {
             let prev = crate::config::COLOR_PRESET_NAMES[0];
             *self.color_active_mut(row) = prev.to_string();
@@ -1626,6 +1629,7 @@ impl App {
         if self.settings_color_idx[row] >= new_len {
             self.settings_color_idx[row] = new_len.saturating_sub(1);
         }
+        let _ = self.config.save();  // persist immediately
     }
 
     /// Sync cursor position to match the current active color.

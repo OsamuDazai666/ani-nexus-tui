@@ -403,36 +403,6 @@ fn draw_color_row(
         render_cell(f, "+", bg, is_add_cur, false, false, &mut x, &mut y);
     }
 
-    // Error indicator inline after cells
-    if let Some(ref err) = app.settings_error {
-        if selected {
-            let err_y = y + 3;
-            if err_y < area.y + area.height {
-                f.render_widget(
-                    Paragraph::new(Span::styled(
-                        err.clone(),
-                        Style::default().fg(Color::Rgb(255,80,80)),
-                    )),
-                    Rect { x: area.x, y: err_y, width: area.width, height: 1 },
-                );
-            }
-        }
-    }
-
-    // Hint: delete
-    if selected && !editing && cursor_idx >= n_presets && cursor_idx < add_idx {
-        let hint_y = y + 3;
-        if hint_y < area.y + area.height {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    "  [Del] delete this color",
-                    Style::default().fg(Color::Rgb(50,50,50)),
-                )),
-                Rect { x: area.x, y: hint_y, width: area.width, height: 1 },
-            );
-        }
-    }
-
     (y - area.y) + 3  // total height used
 }
 
@@ -489,12 +459,8 @@ fn draw_theme(f: &mut Frame, app: &App, area: Rect, edit: bool, accent: Color) {
         // ── Measure how many lines the cells need ──────────────────────────────
         let lines_needed = measure_color_row_lines(app, row_idx, cell_area_w);
         // Each line = 3 tall (cell height), plus 1px gap between lines
-        let cells_h  = lines_needed as u16 * 3 + (lines_needed as u16).saturating_sub(1);
-        // Extra line for error/hint when selected
-        let extra     = if s && (app.settings_error.is_some()
-            || app.settings_color_idx[row_idx] >= crate::config::COLOR_PRESET_NAMES.len() - 1)
-            { 1 } else { 0 };
-        let row_h     = 2 + cells_h + extra; // 2 for outer borders
+        let cells_h = lines_needed as u16 * 3 + (lines_needed as u16).saturating_sub(1);
+        let row_h   = 2 + cells_h; // 2 for outer borders — never changes based on edit state
 
         let row_area = Rect {
             x: area.x, y: area.y + y,
@@ -528,6 +494,30 @@ fn draw_theme(f: &mut Frame, app: &App, area: Rect, edit: bool, accent: Color) {
         draw_color_row(f, app, parts[1], row_idx, s, s && app.settings_editing, accent);
 
         y += row_h;
+
+        // Error or delete hint renders in the 1px gap — no height impact
+        if s {
+            let hint_area = Rect { x: area.x + label_w + 2, y: area.y + y - 1,
+                                   width: area.width.saturating_sub(label_w + 3), height: 1 };
+            if let Some(ref err) = app.settings_error {
+                f.render_widget(
+                    Paragraph::new(Span::styled(err.clone(),
+                        Style::default().fg(Color::Rgb(255, 80, 80)))),
+                    hint_area,
+                );
+            } else {
+                let n_presets = crate::config::COLOR_PRESET_NAMES.len() - 1;
+                let cidx = app.settings_color_idx[row_idx];
+                let n_customs = app.color_customs(row_idx).len();
+                if !app.settings_editing && cidx >= n_presets && cidx < n_presets + n_customs {
+                    f.render_widget(
+                        Paragraph::new(Span::styled("  [Del] remove",
+                            Style::default().fg(Color::Rgb(50, 50, 50)))),
+                        hint_area,
+                    );
+                }
+            }
+        }
     }
 
     // ── Reset row ─────────────────────────────────────────────────────────────
