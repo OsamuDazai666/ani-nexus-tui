@@ -1,5 +1,5 @@
 use crate::app::{App, Focus};
-use crate::ui::{trunc, C_ACCENT, C_BG, C_BG2, C_BG3,
+use crate::ui::{trunc, C_BG, C_BG2, C_BG3,
                 C_BORDER_F, C_DIM, C_PANEL, C_SCORE, C_TEXT};
 use ratatui::{
     layout::Rect,
@@ -22,7 +22,7 @@ pub fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(&app.search_input, Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)),
             Span::styled(
                 if focused { "▌" } else { "" },
-                Style::default().fg(C_ACCENT),
+                Style::default().fg(crate::ui::accent()),
             ),
         ])
     };
@@ -33,7 +33,7 @@ pub fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
                 .title(Span::styled(
                     if focused { " SEARCH " } else { " SEARCH [/] " },
                     Style::default()
-                        .fg(if focused { C_ACCENT } else { C_DIM })
+                        .fg(if focused { crate::ui::accent() } else { C_DIM })
                         .add_modifier(if focused { Modifier::BOLD } else { Modifier::empty() }),
                 ))
                 .borders(Borders::ALL)
@@ -57,7 +57,7 @@ pub fn draw_results(f: &mut Frame, app: &App, area: Rect) {
 
     let container = Block::default()
         .title(Span::styled(title, Style::default()
-            .fg(if focused { C_ACCENT } else { C_DIM })
+            .fg(if focused { crate::ui::accent() } else { C_DIM })
             .add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if focused { C_BORDER_F } else { Color::Rgb(28,28,28) }))
@@ -96,7 +96,7 @@ pub fn draw_results(f: &mut Frame, app: &App, area: Rect) {
         if item_area.y + item_area.height > inner.y + inner.height { break; }
 
         let block_style = if sel && focused {
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+            Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD)
         } else if sel {
             Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)
         } else {
@@ -112,7 +112,7 @@ pub fn draw_results(f: &mut Frame, app: &App, area: Rect) {
         let content = Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(trunc(item.title(), (item_area.width as usize).saturating_sub(15)), 
-                    if sel { Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(C_TEXT) }),
+                    if sel { Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD) } else { Style::default().fg(C_TEXT) }),
                 Span::styled(if eps.is_empty() { "".to_string() } else { format!("  {}", eps) }, Style::default().fg(C_DIM)),
             ]),
             Line::from(vec![

@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::ui::{C_ACCENT, C_DIM};
+use crate::ui::{C_DIM};
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
@@ -48,7 +48,7 @@ pub fn draw_cover(f: &mut Frame, app: &mut App, area: Rect) {
             )),
             Line::from(Span::styled(
                 "  │  ◆   │",
-                Style::default().fg(C_ACCENT),
+                Style::default().fg(crate::ui::accent()),
             )),
             Line::from(Span::styled(
                 "  │      │",

@@ -2,6 +2,7 @@ pub mod detail;
 pub mod history;
 pub mod image;
 pub mod search;
+pub mod settings;
 
 use crate::app::{App, Tab, ToastKind};
 use strum::IntoEnumIterator;
@@ -14,25 +15,96 @@ use ratatui::{
 };
 
 // ── BOLD BLACK PALETTE ────────────────────────────────────────────────────────
-// Pure black base. Single neon accent. High contrast everything.
 
-pub const C_BG:       Color = Color::Rgb(0,   0,   0  );  // pure black
-pub const C_BG2:      Color = Color::Rgb(10,  10,  10 );  // slightly off-black
-pub const C_BG3:      Color = Color::Rgb(18,  18,  18 );  // card bg
-pub const C_PANEL:    Color = Color::Rgb(8,   8,   8  );  // panel bg
-pub const C_BORDER:   Color = Color::Rgb(38,  38,  38 );  // dim border
-pub const C_BORDER_F: Color = Color::Rgb(220, 220, 220);  // focused border — bright white
-pub const C_TEXT:     Color = Color::Rgb(240, 240, 240);  // near-white text
-pub const C_DIM:      Color = Color::Rgb(90,  90,  90 );  // muted text
-pub const C_ACCENT:   Color = Color::Rgb(255, 255, 0  );  // pure yellow — the ONE accent
-pub const C_GREEN:    Color = Color::Rgb(0,   255, 128);  // success / ongoing
-pub const C_RED:      Color = Color::Rgb(255, 50,  50 );  // error / cancelled
-// pub const C_CYAN:     Color = Color::Rgb(0,   220, 255);  // movie type badge
-pub const C_SCORE:    Color = Color::Rgb(255, 200, 0  );  // score stars
+pub const C_BG:       Color = Color::Rgb(0,   0,   0  );
+pub const C_BG2:      Color = Color::Rgb(10,  10,  10 );
+pub const C_BG3:      Color = Color::Rgb(18,  18,  18 );
+pub const C_PANEL:    Color = Color::Rgb(8,   8,   8  );
+pub const C_BORDER:   Color = Color::Rgb(38,  38,  38 );
+pub const C_BORDER_F: Color = Color::Rgb(220, 220, 220);
+pub const C_TEXT:     Color = Color::Rgb(240, 240, 240);
+pub const C_DIM:      Color = Color::Rgb(90,  90,  90 );
+pub const C_ACCENT:   Color = Color::Rgb(255, 255, 0  ); // default yellow — overridden at runtime
+pub const C_GREEN:    Color = Color::Rgb(0,   255, 128);
+pub const C_RED:      Color = Color::Rgb(255, 50,  50 );
+pub const C_SCORE:    Color = Color::Rgb(255, 200, 0  );
+
+// ── Runtime accent — updated each frame from app.config ───────────────────────
+
+use std::cell::Cell;
+
+thread_local! {
+    static ACCENT_R:   Cell<u8> = Cell::new(255);
+    static ACCENT_G:   Cell<u8> = Cell::new(255);
+    static ACCENT_B:   Cell<u8> = Cell::new(0);
+    static BAR_PROG_R: Cell<u8> = Cell::new(255);
+    static BAR_PROG_G: Cell<u8> = Cell::new(255);
+    static BAR_PROG_B: Cell<u8> = Cell::new(0);
+    static BAR_DONE_R: Cell<u8> = Cell::new(0);
+    static BAR_DONE_G: Cell<u8> = Cell::new(200);
+    static BAR_DONE_B: Cell<u8> = Cell::new(150);
+}
+
+pub fn set_accent(r: u8, g: u8, b: u8) {
+    ACCENT_R.with(|c| c.set(r));
+    ACCENT_G.with(|c| c.set(g));
+    ACCENT_B.with(|c| c.set(b));
+}
+
+pub fn set_bar_colors(pr: u8, pg: u8, pb: u8, dr: u8, dg: u8, db: u8) {
+    BAR_PROG_R.with(|c| c.set(pr));
+    BAR_PROG_G.with(|c| c.set(pg));
+    BAR_PROG_B.with(|c| c.set(pb));
+    BAR_DONE_R.with(|c| c.set(dr));
+    BAR_DONE_G.with(|c| c.set(dg));
+    BAR_DONE_B.with(|c| c.set(db));
+}
+
+pub fn accent() -> Color {
+    Color::Rgb(ACCENT_R.with(|c| c.get()), ACCENT_G.with(|c| c.get()), ACCENT_B.with(|c| c.get()))
+}
+
+pub fn accent_dim() -> Color {
+    let r = ACCENT_R.with(|c| c.get()) / 4;
+    let g = ACCENT_G.with(|c| c.get()) / 4;
+    let b = ACCENT_B.with(|c| c.get()) / 4;
+    Color::Rgb(r.max(20), g.max(20), b.max(20))
+}
+
+/// In-progress episode bar color (<90%).
+pub fn bar_progress() -> Color {
+    Color::Rgb(BAR_PROG_R.with(|c| c.get()), BAR_PROG_G.with(|c| c.get()), BAR_PROG_B.with(|c| c.get()))
+}
+
+/// Brighter in-progress bar — used for selected/focused cells.
+pub fn bar_progress_bright() -> Color {
+    let r = (BAR_PROG_R.with(|c| c.get()) as u16 + 40).min(255) as u8;
+    let g = (BAR_PROG_G.with(|c| c.get()) as u16 + 40).min(255) as u8;
+    let b = (BAR_PROG_B.with(|c| c.get()) as u16 + 40).min(255) as u8;
+    Color::Rgb(r, g, b)
+}
+
+/// Complete episode bar color (≥90%).
+pub fn bar_complete() -> Color {
+    Color::Rgb(BAR_DONE_R.with(|c| c.get()), BAR_DONE_G.with(|c| c.get()), BAR_DONE_B.with(|c| c.get()))
+}
+
+/// Dimmed complete bar — used for selected cell fill background.
+pub fn bar_complete_dim() -> Color {
+    let r = BAR_DONE_R.with(|c| c.get()) / 2;
+    let g = BAR_DONE_G.with(|c| c.get()) / 2;
+    let b = BAR_DONE_B.with(|c| c.get()) / 2;
+    Color::Rgb(r.max(15), g.max(15), b.max(15))
+}
 
 // ── Master draw ───────────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let (r, g, b) = crate::config::Config::color_rgb(&app.config.theme.accent);
+    set_accent(r, g, b);
+    let (pr, pg, pb) = crate::config::Config::color_rgb(&app.config.theme.bar_progress);
+    let (dr, dg, db) = crate::config::Config::color_rgb(&app.config.theme.bar_complete);
+    set_bar_colors(pr, pg, pb, dr, dg, db);
     let area = f.area();
 
     // Fill entire terminal with pure black first
@@ -71,7 +143,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     // Logo — bold white with yellow diamond
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("◆ ", Style::default().fg(C_ACCENT)),
+            Span::styled("◆ ", Style::default().fg(crate::ui::accent())),
             Span::styled("NEXUS", Style::default()
                 .fg(C_TEXT)
                 .add_modifier(Modifier::BOLD)),
@@ -87,13 +159,14 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let labels: Vec<Line> = Tab::iter().map(|t| {
         let active = t == app.active_tab;
         let label = match t {
-            Tab::Anime   => " ANIME ",
-            Tab::History => " HISTORY ",
+            Tab::Anime    => " ANIME ",
+            Tab::History  => " HISTORY ",
+            Tab::Settings => " SETTINGS ",
         };
         if active {
             Line::from(Span::styled(label, Style::default()
                 .fg(C_BG)
-                .bg(C_ACCENT)
+                .bg(crate::ui::accent())
                 .add_modifier(Modifier::BOLD)))
         } else {
             Line::from(Span::styled(label, Style::default().fg(C_DIM)))
@@ -119,11 +192,15 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 // ── Body ──────────────────────────────────────────────────────────────────────
 
 fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
-    // Fill body
     f.render_widget(
         Block::default().style(Style::default().bg(C_BG)),
         area,
     );
+
+    if app.active_tab == Tab::Settings {
+        settings::draw(f, app, area);
+        return;
+    }
 
     if app.active_tab == Tab::History {
         history::draw(f, app, area);
@@ -168,7 +245,7 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let more_hint = if app.has_more { "  [Ctrl+N] more" } else { "" };
 
     let line = Line::from(vec![
-        Span::styled(spin, Style::default().fg(C_ACCENT)),
+        Span::styled(spin, Style::default().fg(crate::ui::accent())),
         Span::styled(&app.status, Style::default().fg(C_DIM)),
         Span::styled(more_hint, Style::default().fg(Color::Rgb(55, 55, 55))),
         Span::styled(
@@ -224,13 +301,13 @@ fn draw_toasts(f: &mut Frame, app: &App, area: Rect) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub fn tab_idx(tab: &Tab) -> usize {
-    match tab { Tab::Anime => 0, Tab::History => 1 }
+    match tab { Tab::Anime => 0, Tab::History => 1, Tab::Settings => 2 }
 }
 
 pub fn focused_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
     Block::default()
         .title(Span::styled(title, Style::default()
-            .fg(if focused { C_ACCENT } else { C_DIM })
+            .fg(if focused { crate::ui::accent() } else { C_DIM })
             .add_modifier(if focused { Modifier::BOLD } else { Modifier::empty() })))
         .borders(Borders::ALL)
         .border_style(Style::default()

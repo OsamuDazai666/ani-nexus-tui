@@ -1,5 +1,5 @@
 use crate::app::{App, Focus};
-use crate::ui::{focused_block, C_ACCENT, C_DIM,
+use crate::ui::{focused_block, C_DIM,
                 C_GREEN, C_PANEL, C_RED, C_SCORE, C_TEXT};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -153,7 +153,7 @@ pub fn draw_episode_grid(f: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(Line::from(vec![
             Span::styled(" Episode: ", Style::default().fg(C_DIM)),
             Span::styled(&app.episode_input, Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)),
-            Span::styled(if focused { "▌" } else { "" }, Style::default().fg(C_ACCENT)),
+            Span::styled(if focused { "▌" } else { "" }, Style::default().fg(crate::ui::accent())),
             Span::styled(
                 format!("   {} available", app.episode_list.len()),
                 Style::default().fg(C_DIM),
@@ -205,9 +205,9 @@ pub fn draw_episode_grid(f: &mut Frame, app: &mut App, area: Rect) {
                 // Fill color: ≥90% → teal (watched), <90% → yellow (in-progress)
                 // Each has a normal shade and a brighter shade for when selected
                 let (fill_bg_normal, fill_bg_bright) = if pct.map(|p| p >= 0.90).unwrap_or(false) {
-                    (Color::Rgb(0, 160, 120), Color::Rgb(0, 200, 155))   // teal
+                    (crate::ui::bar_complete_dim(), crate::ui::bar_complete())   // complete
                 } else {
-                    (Color::Rgb(160, 130, 0), Color::Rgb(200, 165, 0))   // yellow
+                    (crate::ui::bar_progress(), crate::ui::bar_progress_bright())   // in-progress
                 };
 
                 let empty_bg = Color::Rgb(28, 28, 28);
@@ -242,7 +242,7 @@ pub fn draw_episode_grid(f: &mut Frame, app: &mut App, area: Rect) {
                         // Selected, no progress — solid accent
                         spans.push(Span::styled(
                             ep_display,
-                            Style::default().fg(Color::Rgb(0,0,0)).bg(C_ACCENT).add_modifier(Modifier::BOLD),
+                            Style::default().fg(Color::Rgb(0,0,0)).bg(crate::ui::accent()).add_modifier(Modifier::BOLD),
                         ));
                     }
                 } else if is_selected {
@@ -294,7 +294,7 @@ pub fn draw_episode_grid(f: &mut Frame, app: &mut App, area: Rect) {
     if focused {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" [↵] PLAY", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(" [↵] PLAY", Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD)),
                 Span::styled("   [hl/←→] col   [jk/↑↓] row   [TAB] sub/dub   [Ctrl+Q] quality   [ESC] detail", Style::default().fg(Color::Rgb(50,50,50))),
             ])).style(Style::default().bg(C_PANEL)),
             rows[2],
@@ -321,7 +321,7 @@ fn stars(s: f32) -> &'static str {
 fn status_dot(s: &str) -> (&'static str, Color) {
     let l = s.to_lowercase();
     if l.contains("finish") || l.contains("complet") || l.contains("released") { ("●", C_GREEN) }
-    else if l.contains("airing") || l.contains("ongoing") || l.contains("returning") { ("●", C_ACCENT) }
+    else if l.contains("airing") || l.contains("ongoing") || l.contains("returning") { ("●", crate::ui::accent()) }
     else if l.contains("cancel") { ("●", C_RED) }
     else { ("○", C_DIM) }
 }
@@ -329,6 +329,6 @@ fn status_dot(s: &str) -> (&'static str, Color) {
 fn key_chip(s: &'static str) -> Span<'static> {
     Span::styled(s, Style::default()
         .fg(Color::Rgb(0,0,0))
-        .bg(C_ACCENT)
+        .bg(crate::ui::accent())
         .add_modifier(Modifier::BOLD))
 }

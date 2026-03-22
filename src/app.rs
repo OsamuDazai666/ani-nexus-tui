@@ -13,12 +13,12 @@ use tokio::sync::{mpsc, Mutex};
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, strum::Display, strum::EnumIter)]
-pub enum Tab { Anime, History }
+pub enum Tab { Anime, History, Settings }
 
 // ── Focus ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Focus { Search, Results, Detail, History, HistoryDetail, HistoryEpisodes, EpisodePrompt }
+pub enum Focus { Search, Results, Detail, History, HistoryDetail, HistoryEpisodes, EpisodePrompt, SettingsList, SettingsEdit }
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
 
@@ -149,6 +149,17 @@ pub struct App {
     /// Set by handle_msg(LaunchMpv) — consumed by main loop to run mpv on main thread
     pub pending_mpv: Option<(String, String, String, f64)>, // (url, anime_id, episode, resume)
 
+    // Settings
+    pub config:            crate::config::Config,
+    pub settings_category: usize,
+    pub settings_row:      usize,
+    pub settings_editing:  bool,
+    pub settings_input:    String,
+    pub settings_error:    Option<String>,
+    pub prev_tab:          Tab,
+    /// Cursor position within each color row's swatch list [accent, progress, complete]
+    pub settings_color_idx: [usize; 3],
+
     // ── In-memory caches ──────────────────────────────────────────────────────
     pub image_cache:  std::collections::HashMap<String, Vec<u8>>,
     image_cache_order: std::collections::VecDeque<String>,
@@ -174,9 +185,12 @@ impl App {
         let db      = Arc::new(HistoryStore::open()?);
         let history = db.load_all()?;
         let protocol = detect_image_protocol();
+        let cfg     = crate::config::Config::load();
 
         Ok(Self {
             active_tab:    Tab::Anime,
+            stream_mode:   cfg.player.stream_mode.clone(),
+            stream_quality: cfg.player.quality.clone(),
             focus:         Focus::Search,
             search_input:  String::new(),
             search_cursor: 0,
@@ -204,8 +218,6 @@ impl App {
             history_ep_window_records: std::collections::HashMap::new(),
             episode_input:    String::new(),
             episode_cursor:   0,
-            stream_mode:      "sub".to_string(),
-            stream_quality:   "best".to_string(),
             episode_list:     Vec::new(),
             episode_list_idx: 0,
             episode_cols:     8,
@@ -220,6 +232,14 @@ impl App {
             cover_protocol: None,
             needs_redraw:  false,
             pending_mpv:   None,
+            config:            cfg.clone(),
+            settings_category: 0,
+            settings_row:      0,
+            settings_editing:  false,
+            settings_input:    String::new(),
+            settings_error:    None,
+            prev_tab:          Tab::Anime,
+            settings_color_idx: [0, 0, 0],
             image_cache:       std::collections::HashMap::new(),
             image_cache_order: std::collections::VecDeque::new(),
             detail_cache:       std::collections::HashMap::new(),
@@ -482,7 +502,6 @@ impl App {
             // Put the image back so future revisits can rebuild
             self.rgba_cache.insert(id.to_string(), img);
             self.cover_protocol = Some(protocol);
-            self.save_debug_image(id);
         }
     }
 
@@ -690,19 +709,6 @@ impl App {
         });
     }
 
-    fn save_debug_image(&self, id: &str) {
-        if let Some(img) = self.rgba_cache.get(id) {
-            if let Ok(home) = std::env::var("HOME") {
-                let debug_dir = std::path::PathBuf::from(&home).join("Desktop").join("nexus-debug");
-                let _ = std::fs::create_dir_all(&debug_dir);
-                let name = self.selected.as_ref()
-                    .map(|s| s.title().replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_"))
-                    .unwrap_or_else(|| "unknown".to_string());
-                let _ = img.save(debug_dir.join(format!("{name}.png")));
-            }
-        }
-    }
-
     fn cache_image(&mut self, url: String, bytes: Vec<u8>) {
         if self.image_cache.contains_key(&url) {
             // Refresh LRU position
@@ -812,17 +818,20 @@ impl App {
             return Ok(true);
         }
 
-        // Global: q quits — but NOT while in Search or EpisodePrompt (q has local meaning there)
+        // Global: q quits — but NOT while in Search, EpisodePrompt, or Settings (q has local meaning / typing)
         if key.code == KeyCode::Char('q')
             && self.focus != Focus::Search
             && self.focus != Focus::EpisodePrompt
+            && self.focus != Focus::SettingsList
+            && self.focus != Focus::SettingsEdit
         {
             return Ok(true);
         }
 
-        // Global: '/' jumps to search bar from anywhere except Search itself or History panes
+        // Global: '/' jumps to search bar — not from Search, History panes, or Settings
         if key.code == KeyCode::Char('/') && self.focus != Focus::Search
             && self.focus != Focus::History && self.focus != Focus::HistoryDetail
+            && self.focus != Focus::SettingsList && self.focus != Focus::SettingsEdit
         {
             self.focus = Focus::Search;
             self.search_cursor = self.search_input.len();
@@ -849,6 +858,8 @@ impl App {
                         Focus::History         => Focus::History,
                         Focus::HistoryDetail   => Focus::HistoryDetail,
                         Focus::HistoryEpisodes => Focus::HistoryEpisodes,
+                        Focus::SettingsList    => Focus::SettingsList,
+                        Focus::SettingsEdit    => Focus::SettingsEdit,
                     };
                     return Ok(false);
                 }
@@ -861,6 +872,8 @@ impl App {
                         Focus::History         => Focus::History,
                         Focus::HistoryDetail   => Focus::HistoryEpisodes,
                         Focus::HistoryEpisodes => Focus::HistoryEpisodes,
+                        Focus::SettingsList    => Focus::SettingsList,
+                        Focus::SettingsEdit    => Focus::SettingsEdit,
                     };
                     return Ok(false);
                 }
@@ -873,6 +886,8 @@ impl App {
                         Focus::History         => Focus::HistoryDetail,
                         Focus::HistoryDetail   => Focus::HistoryEpisodes,
                         Focus::HistoryEpisodes => Focus::HistoryEpisodes,
+                        Focus::SettingsList    => Focus::SettingsEdit,
+                        Focus::SettingsEdit    => Focus::SettingsEdit,
                     };
                     return Ok(false);
                 }
@@ -885,6 +900,8 @@ impl App {
                         Focus::History         => Focus::History,
                         Focus::HistoryDetail   => Focus::History,
                         Focus::HistoryEpisodes => Focus::HistoryDetail,
+                        Focus::SettingsList    => Focus::SettingsList,
+                        Focus::SettingsEdit    => Focus::SettingsList,
                     };
                     return Ok(false);
                 }
@@ -894,8 +911,9 @@ impl App {
 
         // Tab switching — F1..F5
         match key.code {
-            KeyCode::F(1) => { self.switch_tab(Tab::Anime);   return Ok(false); }
-            KeyCode::F(2) => { self.switch_tab(Tab::History); return Ok(false); }
+            KeyCode::F(1) => { self.switch_tab(Tab::Anime);    return Ok(false); }
+            KeyCode::F(2) => { self.switch_tab(Tab::History);  return Ok(false); }
+            KeyCode::F(3) => { self.switch_tab(Tab::Settings); return Ok(false); }
             _ => {}
         }
 
@@ -906,6 +924,7 @@ impl App {
             Focus::History         => self.key_history(key).await?,
             Focus::HistoryDetail   => self.key_history_detail(key).await?,
             Focus::HistoryEpisodes => self.key_history_episodes(key).await?,
+            Focus::SettingsList | Focus::SettingsEdit => self.key_settings(key).await?,
             Focus::EpisodePrompt   => self.key_episode_prompt(key).await?,
         }
         Ok(false)
@@ -1257,6 +1276,382 @@ impl App {
     }
 
     /// Rebuild history_filtered from history_filter using fuzzy match.
+    async fn key_settings(&mut self, key: KeyEvent) -> Result<()> {
+        use crate::config::parse_custom_color;
+
+        // ── Text edit mode ────────────────────────────────────────────────────
+        if self.settings_editing {
+            let is_color_row = self.settings_category == 1 && self.settings_row <= 2;
+            match key.code {
+                KeyCode::Esc => {
+                    if is_color_row {
+                        self.settings_color_commit(self.settings_row, true);
+                    } else {
+                        self.settings_editing = false;
+                        self.settings_input.clear();
+                        self.settings_error = None;
+                    }
+                }
+                // ←/→ while editing color: try save, move cursor
+                KeyCode::Right | KeyCode::Left if is_color_row => {
+                    let step = if key.code == KeyCode::Right { 1 } else { -1 };
+                    let saved = self.settings_color_commit(self.settings_row, false);
+                    if saved {
+                        self.settings_color_move(self.settings_row, step);
+                    }
+                    // If not saved, error is already set — stay in edit mode
+                }
+                KeyCode::Enter => {
+                    if is_color_row {
+                        self.settings_color_commit(self.settings_row, false);
+                    } else {
+                        let input = self.settings_input.trim().to_string();
+                        match (self.settings_category, self.settings_row) {
+                            (0, 2) => { self.config.player.mpv_path = input; }
+                            (0, 3) => {
+                                self.config.player.extra_args =
+                                    input.split_whitespace().map(String::from).collect();
+                            }
+                            _ => {}
+                        }
+                        self.settings_editing = false;
+                        self.settings_input.clear();
+                        self.settings_error = None;
+                    }
+                }
+                KeyCode::Backspace => { self.settings_input.pop(); }
+                KeyCode::Char(c)   => { self.settings_input.push(c); }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // ── Category list (left pane) ─────────────────────────────────────────
+        if self.focus == Focus::SettingsList {
+            match key.code {
+                KeyCode::Up   | KeyCode::Char('k') => {
+                    if self.settings_category > 0 {
+                        self.settings_category -= 1;
+                        self.settings_row = 0;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.settings_category < 3 {
+                        self.settings_category += 1;
+                        self.settings_row = 0;
+                    }
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                    self.focus = Focus::SettingsEdit;
+                }
+                KeyCode::Esc | KeyCode::F(3) => {
+                    self.switch_tab(self.prev_tab.clone());
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // ── Settings rows (right pane) ────────────────────────────────────────
+        let max = self.settings_max_rows();
+        match key.code {
+            // Ctrl+Left or Esc → back to category list
+            KeyCode::Left if {
+                let mods = key.modifiers;
+                mods.contains(crossterm::event::KeyModifiers::CONTROL)
+            } => {
+                self.focus = Focus::SettingsList;
+                self.settings_error = None;
+                return Ok(());
+            }
+            KeyCode::Esc => {
+                self.focus = Focus::SettingsList;
+                self.settings_error = None;
+            }
+            KeyCode::Up   | KeyCode::Char('k') => {
+                if self.settings_row > 0 { self.settings_row -= 1; }
+                // Sync color cursor when changing rows
+                if self.settings_category == 1 && self.settings_row <= 2 {
+                    self.settings_color_sync_idx(self.settings_row);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.settings_row + 1 < max { self.settings_row += 1; }
+                if self.settings_category == 1 && self.settings_row <= 2 {
+                    self.settings_color_sync_idx(self.settings_row);
+                }
+            }
+            KeyCode::Right => { self.settings_cycle(1); }
+            KeyCode::Left  => { self.settings_cycle_back(); }
+            KeyCode::Delete => {
+                // Delete custom swatch under cursor on theme color rows
+                if self.settings_category == 1 && self.settings_row <= 2 {
+                    self.settings_color_delete(self.settings_row);
+                }
+            }
+            KeyCode::Enter => {
+                match (self.settings_category, self.settings_row) {
+                    (1, 3) => {
+                        self.config.theme  = crate::config::ThemeConfig::default();
+                        self.config.player = crate::config::PlayerConfig::default();
+                        self.config.ui     = crate::config::UiConfig::default();
+                        self.stream_mode    = self.config.player.stream_mode.clone();
+                        self.stream_quality = self.config.player.quality.clone();
+                        self.settings_color_idx = [0, 0, 0];
+                        self.toast_success("Settings reset to defaults");
+                    }
+                    (1, row @ 0..=2) => {
+                        // Enter on [+] cell (already active via color_apply) or jump to [+]
+                        let add_idx = self.color_row_len(row).saturating_sub(1);
+                        self.settings_color_idx[row] = add_idx;
+                        self.settings_input   = String::new();
+                        self.settings_editing = true;
+                        self.settings_error   = None;
+                    }
+                    _ if self.settings_is_text_field() => {
+                        self.settings_input = self.settings_current_text_value();
+                        self.settings_editing = true;
+                    }
+                    _ => { self.settings_cycle(1); }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn settings_max_rows(&self) -> usize {
+        match self.settings_category {
+            0 => 4,  // audio, quality, mpv_path, extra_args
+            1 => 4,  // accent, progress_bar, complete_bar, reset
+            2 => 3,  // image_protocol, results_limit, episode_cols
+            3 => 1,
+            _ => 1,
+        }
+    }
+
+    fn settings_is_text_field(&self) -> bool {
+        matches!((self.settings_category, self.settings_row),
+            (0, 2) | (0, 3))
+    }
+
+    fn settings_current_text_value(&self) -> String {
+        match (self.settings_category, self.settings_row) {
+            (0, 2) => self.config.player.mpv_path.clone(),
+            (0, 3) => self.config.player.extra_args.join(" "),
+            (1, 1) => {
+                let accent = &self.config.theme.accent;
+                if crate::config::COLOR_PRESET_NAMES.contains(&accent.as_str()) {
+                    String::new()
+                } else {
+                    accent.clone()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Cycle a color picker or toggle forward by `step`.
+    fn settings_cycle(&mut self, step: i32) {
+        match (self.settings_category, self.settings_row) {
+            // Playback toggles
+            (0, 0) => {
+                let opts = ["sub", "dub"];
+                self.config.player.stream_mode =
+                    cycle_str(&self.config.player.stream_mode.clone(), &opts, step).into();
+                self.stream_mode = self.config.player.stream_mode.clone();
+            }
+            (0, 1) => {
+                let opts = ["best", "1080", "720", "480"];
+                self.config.player.quality =
+                    cycle_str(&self.config.player.quality.clone(), &opts, step).into();
+                self.stream_quality = self.config.player.quality.clone();
+            }
+            // Theme: accent color (←/→ moves cursor, Enter/→ on + cell opens input)
+            (1, 0) => { self.settings_color_move(0, step); }
+            // Theme: progress bar color
+            (1, 1) => { self.settings_color_move(1, step); }
+            // Theme: complete bar color
+            (1, 2) => { self.settings_color_move(2, step); }
+            // Theme: reset — Enter/→ triggers reset
+            (1, 3) => {
+                // Reset handled in Enter path — cycle does nothing here
+            }
+            // Display
+            (2, 0) => {
+                let opts = ["auto", "kitty", "halfblock"];
+                self.config.ui.image_protocol =
+                    cycle_str(&self.config.ui.image_protocol.clone(), &opts, step).into();
+            }
+            (2, 1) => {
+                self.config.ui.results_limit = if self.config.ui.results_limit == 25 { 50 } else { 25 };
+            }
+            (2, 2) => {
+                let opts = ["auto", "2", "3"];
+                self.config.ui.episode_cols =
+                    cycle_str(&self.config.ui.episode_cols.clone(), &opts, step).into();
+            }
+            _ => {}
+        }
+    }
+
+    fn settings_cycle_back(&mut self) {
+        self.settings_cycle(-1);
+    }
+
+    // ── Color row helpers ─────────────────────────────────────────────────────
+
+    /// Total number of swatches in a color row: presets + customs + 1 (add cell).
+    pub fn color_row_len(&self, row: usize) -> usize {
+        let n_presets = crate::config::COLOR_PRESET_NAMES.len() - 1; // exclude "Custom" label
+        let customs = self.color_customs(row);
+        n_presets + customs.len() + 1 // +1 for the [+] input cell
+    }
+
+    /// Custom colors list for a color row.
+    pub fn color_customs(&self, row: usize) -> &Vec<String> {
+        match row {
+            0 => &self.config.theme.accent_custom,
+            1 => &self.config.theme.bar_progress_custom,
+            _ => &self.config.theme.bar_complete_custom,
+        }
+    }
+
+    fn color_customs_mut(&mut self, row: usize) -> &mut Vec<String> {
+        match row {
+            0 => &mut self.config.theme.accent_custom,
+            1 => &mut self.config.theme.bar_progress_custom,
+            _ => &mut self.config.theme.bar_complete_custom,
+        }
+    }
+
+    fn color_active_mut(&mut self, row: usize) -> &mut String {
+        match row {
+            0 => &mut self.config.theme.accent,
+            1 => &mut self.config.theme.bar_progress,
+            _ => &mut self.config.theme.bar_complete,
+        }
+    }
+
+    /// Move cursor within a color row. Opens input if landing on [+] cell.
+    fn settings_color_move(&mut self, row: usize, step: i32) {
+        let len = self.color_row_len(row) as i32;
+        let cur = self.settings_color_idx[row] as i32;
+        let new = ((cur + step).rem_euclid(len)) as usize;
+        self.settings_color_idx[row] = new;
+        // Apply the selection
+        self.settings_color_apply(row);
+    }
+
+    /// Apply the current cursor position as the active color.
+    /// If on the [+] cell, open the text input.
+    fn settings_color_apply(&mut self, row: usize) {
+        let idx = self.settings_color_idx[row];
+        let n_presets = crate::config::COLOR_PRESET_NAMES.len() - 1;
+        let n_customs = self.color_customs(row).len();
+        let add_idx   = n_presets + n_customs;
+
+        if idx < n_presets {
+            // Preset
+            let name = crate::config::COLOR_PRESET_NAMES[idx];
+            *self.color_active_mut(row) = name.to_string();
+            self.settings_editing = false;
+            self.settings_error   = None;
+        } else if idx < add_idx {
+            // Custom saved color
+            let val = self.color_customs(row)[idx - n_presets].clone();
+            *self.color_active_mut(row) = val;
+            self.settings_editing = false;
+            self.settings_error   = None;
+        } else {
+            // [+] add cell — open input
+            self.settings_input   = String::new();
+            self.settings_editing = true;
+            self.settings_error   = None;
+        }
+    }
+
+    /// Called when leaving the [+] input cell (Enter or ←/→).
+    /// Returns true if saved, false if invalid.
+    fn settings_color_commit(&mut self, row: usize, discard: bool) -> bool {
+        if discard {
+            self.settings_editing = false;
+            self.settings_input.clear();
+            self.settings_error = None;
+            return true;
+        }
+        let input = self.settings_input.trim().to_string();
+        if input.is_empty() {
+            self.settings_editing = false;
+            return true;
+        }
+        if crate::config::parse_custom_color(&input).is_some() {
+            // Save and select
+            let customs = self.color_customs_mut(row);
+            if !customs.contains(&input) {
+                customs.push(input.clone());
+            }
+            let idx = self.color_customs(row).iter().position(|c| c == &input).unwrap_or(0);
+            let n_presets = crate::config::COLOR_PRESET_NAMES.len() - 1;
+            self.settings_color_idx[row] = n_presets + idx;
+            *self.color_active_mut(row) = input;
+            self.settings_editing = false;
+            self.settings_input.clear();
+            self.settings_error = None;
+            true
+        } else {
+            self.settings_error = Some("✗ invalid — use #rrggbb or r,g,b".into());
+            false
+        }
+    }
+
+    /// Delete the custom swatch under the cursor (if it is a custom swatch).
+    fn settings_color_delete(&mut self, row: usize) {
+        let idx       = self.settings_color_idx[row];
+        let n_presets = crate::config::COLOR_PRESET_NAMES.len() - 1;
+        let n_customs = self.color_customs(row).len();
+        if idx < n_presets || idx >= n_presets + n_customs { return; } // not a custom
+
+        let custom_idx = idx - n_presets;
+        let deleted    = self.color_customs_mut(row).remove(custom_idx);
+
+        // If the deleted color was the active one, fall back to previous preset
+        if self.color_active_mut(row) == &deleted {
+            let prev = crate::config::COLOR_PRESET_NAMES[0];
+            *self.color_active_mut(row) = prev.to_string();
+        }
+
+        // Clamp cursor
+        let new_len = self.color_row_len(row);
+        if self.settings_color_idx[row] >= new_len {
+            self.settings_color_idx[row] = new_len.saturating_sub(1);
+        }
+    }
+
+    /// Sync cursor position to match the current active color.
+    pub fn settings_color_sync_idx(&mut self, row: usize) {
+        let active    = self.color_active_mut(row).clone();
+        let n_presets = crate::config::COLOR_PRESET_NAMES.len() - 1;
+        // Check presets
+        if let Some(i) = crate::config::COLOR_PRESET_NAMES[..n_presets]
+            .iter().position(|&n| n == active) {
+            self.settings_color_idx[row] = i;
+            return;
+        }
+        // Check customs
+        if let Some(i) = self.color_customs(row).iter().position(|c| c == &active) {
+            self.settings_color_idx[row] = n_presets + i;
+            return;
+        }
+        self.settings_color_idx[row] = 0;
+    }
+
+    /// Current runtime accent color from config.
+    pub fn accent_color(&self) -> ratatui::style::Color {
+        let (r, g, b) = crate::config::Config::accent_rgb(&self.config.theme.accent);
+        ratatui::style::Color::Rgb(r, g, b)
+    }
+
     pub fn rebuild_history_filter(&mut self) {
         if self.history_filter.is_empty() {
             self.history_filtered.clear();
@@ -1314,7 +1709,28 @@ impl App {
     // ── Tab switch ────────────────────────────────────────────────────────────
 
     pub fn switch_tab(&mut self, tab: Tab) {
+        // Save config when leaving Settings
+        if self.active_tab == Tab::Settings && tab != Tab::Settings {
+            self.config.player.stream_mode   = self.stream_mode.clone();
+            self.config.player.quality       = self.stream_quality.clone();
+            let _ = self.config.save();
+        }
+
+        // Track previous non-settings tab for Esc-back
+        if self.active_tab != Tab::Settings {
+            self.prev_tab = self.active_tab.clone();
+        }
+
         self.active_tab  = tab.clone();
+
+        if tab == Tab::Settings {
+            self.focus = Focus::SettingsList;
+            self.settings_editing = false;
+            self.settings_error   = None;
+            self.status = "Settings  •  [jk] navigate  [←→] change  [Enter] edit  [F1-F2] other tabs".into();
+            return;
+        }
+
         self.results.clear();
         self.selected    = None;
         self.cover_protocol = None;
@@ -1324,19 +1740,16 @@ impl App {
         self.search_cursor = 0;
         self.current_page = 1;
         self.has_more    = false;
-        // Clear history filter when switching tabs
         self.history_filter.clear();
         self.history_filtered.clear();
         self.history_cover = None;
         self.history_cover_id = None;
         self.history_episode_list.clear();
         self.history_ep_window_records.clear();
-        self.history_episode_idx = 0;
-                        self.history_ep_window_start = 0;
-                        self.history_ep_window_end   = 0;
+        self.history_episode_idx      = 0;
+        self.history_ep_window_start  = 0;
+        self.history_ep_window_end    = 0;
         self.history_episodes_loading = false;
-        self.history_ep_window_start = 0;
-        self.history_ep_window_end   = 0;
         self.focus = if tab == Tab::History { Focus::History } else { Focus::Search };
         self.status = format!("{tab}  •  type to search");
     }
@@ -1368,7 +1781,8 @@ impl App {
             let res: anyhow::Result<Vec<ContentItem>> = match tab {
                 Tab::Anime   => allanime::search_allanime(&query, &mode).await
                                     .map(|v| v.into_iter().map(ContentItem::Anime).collect()),
-                Tab::History => Ok(vec![]),
+                Tab::History  => Ok(vec![]),
+                Tab::Settings => Ok(vec![]),
             };
             match res {
                 Ok(items) => {
@@ -1688,4 +2102,22 @@ fn fuzzy_match(haystack: &str, needle: &[char]) -> bool {
         }
     }
     false
+}
+/// Cycle through a list of string options, wrapping around.
+fn cycle_str<'a>(current: &str, opts: &[&'a str], step: i32) -> &'a str {
+    let idx = opts.iter().position(|&o| o == current).unwrap_or(0);
+    let len = opts.len() as i32;
+    let new_idx = ((idx as i32 + step).rem_euclid(len)) as usize;
+    opts[new_idx]
+}
+
+/// Cycle through named color presets only (Custom excluded — use Enter for that).
+fn cycle_color(current: &str, _names: &[&str], step: i32) -> &'static str {
+    // Include Custom so arrow keys can land on it and open the text field
+    let presets: &[&str] = crate::config::COLOR_PRESET_NAMES;
+    let idx = presets.iter().position(|&n| n == current)
+        .unwrap_or(presets.len() - 1); // non-preset values land on Custom
+    let len = presets.len() as i32;
+    let new_idx = ((idx as i32 + step).rem_euclid(len)) as usize;
+    presets[new_idx]
 }

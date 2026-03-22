@@ -1,9 +1,9 @@
 use crate::app::{App, Focus};
-use crate::ui::{focused_block, trunc, C_ACCENT, C_BG, C_BG3,
+use crate::ui::{focused_block, trunc, C_BG, C_BG3,
                 C_BORDER_F, C_DIM, C_PANEL, C_TEXT, C_BORDER};
 
 // Teal — complements the yellow accent for watched/complete state
-const C_WATCHED: Color = Color::Rgb(0, 200, 150);
+
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -55,7 +55,7 @@ fn draw_filter_bar(f: &mut Frame, app: &App, area: Rect, list_focused: bool) {
             Span::styled(&app.history_filter, Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)),
             Span::styled(
                 if list_focused { "▌" } else { "" },
-                Style::default().fg(C_ACCENT),
+                Style::default().fg(crate::ui::accent()),
             ),
             Span::styled(
                 format!("  {} match{}", app.history_filtered.len(),
@@ -66,7 +66,7 @@ fn draw_filter_bar(f: &mut Frame, app: &App, area: Rect, list_focused: bool) {
     };
 
     let title = if has_filter {
-        Span::styled(" FILTER [Esc clear] ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))
+        Span::styled(" FILTER [Esc clear] ", Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD))
     } else {
         Span::styled(" FILTER ", Style::default().fg(C_DIM))
     };
@@ -77,7 +77,7 @@ fn draw_filter_bar(f: &mut Frame, app: &App, area: Rect, list_focused: bool) {
                 .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(
-                    if has_filter { C_ACCENT }
+                    if has_filter { crate::ui::accent() }
                     else if list_focused { C_BORDER_F }
                     else { C_BORDER }
                 ))
@@ -100,7 +100,7 @@ fn draw_cards(f: &mut Frame, app: &App, area: Rect, list_focused: bool) {
 
     let container = Block::default()
         .title(Span::styled(title_str, Style::default()
-            .fg(if list_focused { C_ACCENT } else { C_DIM })
+            .fg(if list_focused { crate::ui::accent() } else { C_DIM })
             .add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if list_focused { C_BORDER_F } else { C_BORDER }))
@@ -161,7 +161,7 @@ fn draw_cards(f: &mut Frame, app: &App, area: Rect, list_focused: bool) {
         if card_area.y + card_area.height > inner.y + inner.height { break; }
 
         let border_style = if sel && list_focused {
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+            Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD)
         } else if sel {
             Style::default().fg(C_TEXT)
         } else {
@@ -203,7 +203,7 @@ fn draw_mini_thumb(f: &mut Frame, entry: &crate::db::history::HistoryEntry, area
         Line::from(Span::styled("┌─────┐", Style::default().fg(Color::Rgb(45, 45, 45)))),
         Line::from(vec![
             Span::styled("│  ", Style::default().fg(Color::Rgb(45, 45, 45))),
-            Span::styled(first.to_string(), Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(first.to_string(), Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD)),
             Span::styled("  │", Style::default().fg(Color::Rgb(45, 45, 45))),
         ]),
         Line::from(Span::styled("└─────┘", Style::default().fg(Color::Rgb(45, 45, 45)))),
@@ -219,7 +219,7 @@ fn draw_card_text(
     focused: bool,
 ) {
     let title_style = if sel && focused {
-        Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+        Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD)
     } else if sel {
         Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)
     } else {
@@ -244,7 +244,7 @@ fn draw_card_text(
     let mut meta_spans = vec![Span::styled(date_str, Style::default().fg(C_DIM))];
     if !prog_str.is_empty() {
         meta_spans.push(Span::styled("  ", Style::default()));
-        meta_spans.push(Span::styled(prog_str, Style::default().fg(C_WATCHED)));
+        meta_spans.push(Span::styled(prog_str, Style::default().fg(crate::ui::bar_complete())));
     }
     if !play_str.is_empty() {
         meta_spans.push(Span::styled("  ", Style::default()));
@@ -254,7 +254,7 @@ fn draw_card_text(
 
     let bar_width = (area.width as usize).saturating_sub(1);
     let bar = entry.progress_bar(bar_width);
-    let bar_color = if sel && focused { C_ACCENT } else { Color::Rgb(60, 60, 0) };
+    let bar_color = if sel && focused { crate::ui::accent() } else { crate::ui::accent_dim() };
     let line3 = Line::from(Span::styled(bar, Style::default().fg(bar_color)));
 
     f.render_widget(Paragraph::new(vec![line1, line2, line3]), area);
@@ -318,7 +318,7 @@ fn draw_detail_cover(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(
-            if focused { Color::Rgb(80, 80, 0) } else { C_BORDER }
+            if focused { crate::ui::accent_dim() } else { C_BORDER }
         ))
         .style(Style::default().bg(Color::Rgb(0, 0, 0)));
 
@@ -337,7 +337,7 @@ fn draw_detail_cover(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
             Line::from(""),
             Line::from(Span::styled("  ┌──────────┐", Style::default().fg(Color::Rgb(35, 35, 35)))),
             Line::from(Span::styled("  │          │", Style::default().fg(Color::Rgb(35, 35, 35)))),
-            Line::from(Span::styled("  │    ◆     │", Style::default().fg(C_ACCENT))),
+            Line::from(Span::styled("  │    ◆     │", Style::default().fg(crate::ui::accent()))),
             Line::from(Span::styled("  │          │", Style::default().fg(Color::Rgb(35, 35, 35)))),
             Line::from(Span::styled("  └──────────┘", Style::default().fg(Color::Rgb(35, 35, 35)))),
         ];
@@ -364,7 +364,7 @@ fn draw_detail_meta(
             Span::styled("  TYPE    ", Style::default().fg(C_DIM)),
             Span::styled(
                 entry.media_type.to_uppercase(),
-                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -386,11 +386,11 @@ fn draw_detail_meta(
     match (entry.progress, entry.total) {
         (Some(p), Some(t)) => lines.push(Line::from(vec![
             Span::styled("  PROG    ", Style::default().fg(C_DIM)),
-            Span::styled(format!("Ep {p} / {t}"), Style::default().fg(C_WATCHED).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("Ep {p} / {t}"), Style::default().fg(crate::ui::bar_complete()).add_modifier(Modifier::BOLD)),
         ])),
         (Some(p), None) => lines.push(Line::from(vec![
             Span::styled("  PROG    ", Style::default().fg(C_DIM)),
-            Span::styled(format!("Ep {p}"), Style::default().fg(C_WATCHED).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("Ep {p}"), Style::default().fg(crate::ui::bar_complete()).add_modifier(Modifier::BOLD)),
         ])),
         _ => {}
     }
@@ -412,11 +412,11 @@ fn draw_detail_meta(
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(" [→] EPISODES ", Style::default()
-                .fg(Color::Rgb(0, 0, 0)).bg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                .fg(Color::Rgb(0, 0, 0)).bg(crate::ui::accent()).add_modifier(Modifier::BOLD)),
             Span::styled("   ", Style::default()),
             Span::styled("[Del] remove", Style::default().fg(C_DIM)),
             Span::styled("   ", Style::default()),
-            Span::styled("[←] back", Style::default().fg(Color::Rgb(50,50,0))),
+            Span::styled("[←] back", Style::default().fg(crate::ui::accent_dim())),
         ]));
     } else if episodes_focused {
         lines.push(Line::from(Span::styled(
@@ -436,13 +436,13 @@ fn draw_detail_meta(
         .title(Span::styled(
             " ENTRY ",
             Style::default()
-                .fg(if focused { C_ACCENT } else { C_DIM })
+                .fg(if focused { crate::ui::accent() } else { C_DIM })
                 .add_modifier(if focused { Modifier::BOLD } else { Modifier::empty() }),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(
             if focused { C_BORDER_F }
-            else if episodes_focused { Color::Rgb(50, 50, 0) }
+            else if episodes_focused { crate::ui::accent_dim() }
             else { C_BORDER }
         ))
         .style(Style::default().bg(C_PANEL));
@@ -465,7 +465,7 @@ fn draw_detail_gauge(f: &mut Frame, entry: &crate::db::history::HistoryEntry, ar
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(C_BORDER))
                 .style(Style::default().bg(C_PANEL)))
-            .gauge_style(Style::default().fg(C_ACCENT).bg(Color::Rgb(20, 20, 20)))
+            .gauge_style(Style::default().fg(crate::ui::accent()).bg(Color::Rgb(20, 20, 20)))
             .ratio(pct)
             .label(Span::styled(
                 label,
@@ -490,13 +490,13 @@ fn draw_episode_list(
     let title = if loading {
         Span::styled(
             format!(" {} EPISODES ", app.spinner.symbol()),
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
             format!(" EPISODES  {} ", ep_count),
             Style::default()
-                .fg(if focused { C_ACCENT } else { C_DIM })
+                .fg(if focused { crate::ui::accent() } else { C_DIM })
                 .add_modifier(Modifier::BOLD),
         )
     };
@@ -560,11 +560,11 @@ fn draw_episode_list(
 
         // ── Bordered cell ─────────────────────────────────────────────────────
         let border_style = if sel && focused {
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+            Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD)
         } else if sel {
             Style::default().fg(C_TEXT)
         } else if is_cur {
-            Style::default().fg(Color::Rgb(60, 60, 0))
+            Style::default().fg(crate::ui::accent_dim())
         } else {
             Style::default().fg(Color::Rgb(32, 32, 32))
         };
@@ -579,13 +579,13 @@ fn draw_episode_list(
 
         // ── Label line ────────────────────────────────────────────────────────
         let (icon, icon_color) = match rec {
-            Some(r) if r.fully_watched          => ("✓", C_WATCHED),
-            Some(r) if r.position_seconds > 5.0 => ("▶", C_ACCENT),
+            Some(r) if r.fully_watched          => ("✓", crate::ui::bar_complete()),
+            Some(r) if r.position_seconds > 5.0 => ("▶", crate::ui::accent()),
             _                                    => ("·", C_DIM),
         };
 
         let label_style = if sel && focused {
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+            Style::default().fg(crate::ui::accent()).add_modifier(Modifier::BOLD)
         } else if sel || is_cur {
             Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD)
         } else {
@@ -602,7 +602,7 @@ fn draw_episode_list(
         ];
 
         if is_cur && !sel {
-            label_spans.push(Span::styled(" ◀", Style::default().fg(C_ACCENT).bg(cell_bg)));
+            label_spans.push(Span::styled(" ◀", Style::default().fg(crate::ui::accent()).bg(cell_bg)));
         }
 
         // Resume timestamp on selected focused cell
@@ -613,7 +613,7 @@ fn draw_episode_list(
                 let s = (pos as u64) % 60;
                 label_spans.push(Span::styled(
                     format!("  {m}:{s:02}"),
-                    Style::default().fg(Color::Rgb(50, 50, 0)).bg(cell_bg),
+                    Style::default().fg(crate::ui::accent_dim()).bg(cell_bg),
                 ));
             }
         }
@@ -627,11 +627,7 @@ fn draw_episode_list(
         let bar_y = cell_inner.y + 1;
         if bar_y >= inner.y + inner.height { continue; }
 
-        let bar_color = if rec.map(|r| r.fully_watched).unwrap_or(false) {
-            C_WATCHED
-        } else {
-            C_ACCENT
-        };
+        let bar_color = if rec.map(|r| r.fully_watched).unwrap_or(false) { crate::ui::bar_complete() } else { crate::ui::bar_progress() };
 
         // Compute pct: exact ratio if we have duration, estimate if not
         let pct = rec.and_then(|r| {
@@ -696,7 +692,7 @@ fn draw_episode_list(
 
         for ty in (inner.y)..(inner.y + inner.height) {
             let (ch, style) = if ty == thumb_y {
-                ("█", Style::default().fg(C_ACCENT))
+                ("█", Style::default().fg(crate::ui::accent()))
             } else {
                 ("│", Style::default().fg(Color::Rgb(35, 35, 35)))
             };
