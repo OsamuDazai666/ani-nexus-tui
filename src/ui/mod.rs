@@ -24,7 +24,6 @@ pub const C_BORDER: Color = Color::Rgb(38, 38, 38);
 pub const C_BORDER_F: Color = Color::Rgb(220, 220, 220);
 pub const C_TEXT: Color = Color::Rgb(240, 240, 240);
 pub const C_DIM: Color = Color::Rgb(90, 90, 90);
-pub const C_ACCENT: Color = Color::Rgb(255, 255, 0); // default yellow — overridden at runtime
 pub const C_GREEN: Color = Color::Rgb(0, 255, 128);
 pub const C_RED: Color = Color::Rgb(255, 50, 50);
 pub const C_SCORE: Color = Color::Rgb(255, 200, 0);

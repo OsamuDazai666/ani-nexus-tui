@@ -101,17 +101,6 @@ impl Toast {
     pub fn alive(&self) -> bool {
         self.born.elapsed() < Duration::from_secs(5)
     }
-    pub fn age_pct(&self) -> f64 {
-        (self.born.elapsed().as_secs_f64() / 5.0).clamp(0.0, 1.0)
-    }
-}
-
-// ── Image protocol ────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImageProtocol {
-    Kitty,
-    HalfBlock,
 }
 
 // ── Async messages ────────────────────────────────────────────────────────────
@@ -132,7 +121,7 @@ pub enum AppMsg {
         id: String,
         image: image::DynamicImage,
     },
-    StreamUrl(String),
+
     EpisodeList {
         id: String,
         eps: Vec<String>,
@@ -146,7 +135,7 @@ pub enum AppMsg {
         records: Vec<EpisodeRecord>,
     },
     MalIdResolved(Option<u32>),
-    SkipTimesReady(Option<crate::api::allanime::SkipTimes>),
+
     /// Windowed episode records loaded from DB
     EpisodeWindowLoaded {
         anime_id: String,
@@ -229,7 +218,6 @@ pub struct App {
     pub toasts: Vec<Toast>,
     pub status: String,
 
-    pub image_protocol: ImageProtocol,
     pub image_picker: ratatui_image::picker::Picker,
     pub cover_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
     pub needs_redraw: bool,
@@ -256,8 +244,6 @@ pub struct App {
     /// MAL ID for the currently selected anime (resolved async for AniSkip)
     pub mal_id: Option<u32>,
     /// Skip timestamps for the currently playing episode
-    pub skip_times: Option<crate::api::allanime::SkipTimes>,
-
     // ── In-memory caches ──────────────────────────────────────────────────────
     pub image_cache: std::collections::HashMap<String, Vec<u8>>,
     image_cache_order: std::collections::VecDeque<String>,
@@ -282,7 +268,7 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         let db = Arc::new(HistoryStore::open()?);
         let history = db.load_all()?;
-        let protocol = detect_image_protocol();
+
         let cfg = crate::config::Config::load();
 
         Ok(Self {
@@ -326,7 +312,7 @@ impl App {
             spinner: Spinner::new(),
             toasts: Vec::new(),
             status: "Type to search  •  press Enter".to_string(),
-            image_protocol: protocol,
+
             image_picker,
             cover_protocol: None,
             needs_redraw: false,
@@ -340,7 +326,7 @@ impl App {
             prev_tab: Tab::Anime,
             settings_color_idx: [0, 0, 0],
             mal_id: None,
-            skip_times: None,
+
             image_cache: std::collections::HashMap::new(),
             image_cache_order: std::collections::VecDeque::new(),
             detail_cache: std::collections::HashMap::new(),
@@ -480,22 +466,6 @@ impl App {
                 }
             }
 
-            AppMsg::StreamUrl(url) => {
-                self.is_searching = false;
-                self.status = "Playing".to_string();
-                self.toast_success("Launching mpv…");
-                // Defer to main loop for terminal-safe launch
-                self.pending_mpv = Some((
-                    url,
-                    String::new(),
-                    String::new(),
-                    0.0,
-                    None,
-                    "none".to_string(),
-                ));
-                self.needs_redraw = true;
-            }
-
             AppMsg::LaunchMpv {
                 url,
                 anime_id,
@@ -558,15 +528,6 @@ impl App {
             AppMsg::MalIdResolved(id) => {
                 crate::api::allanime::skip_log(&format!("[nexus-skip] MAL ID resolved: {:?}", id));
                 self.mal_id = id;
-            }
-
-            AppMsg::SkipTimesReady(times) => {
-                crate::api::allanime::skip_log(&format!(
-                    "[nexus-skip] SkipTimesReady: intro={} outro={}",
-                    times.as_ref().map(|t| t.intro.is_some()).unwrap_or(false),
-                    times.as_ref().map(|t| t.outro.is_some()).unwrap_or(false)
-                ));
-                self.skip_times = times;
             }
 
             AppMsg::HistoryEpisodeList { anime_id, eps } => {
@@ -2156,12 +2117,6 @@ impl App {
         self.settings_color_idx[row] = 0;
     }
 
-    /// Current runtime accent color from config.
-    pub fn accent_color(&self) -> ratatui::style::Color {
-        let (r, g, b) = crate::config::Config::accent_rgb(&self.config.theme.accent);
-        ratatui::style::Color::Rgb(r, g, b)
-    }
-
     pub fn rebuild_history_filter(&mut self) {
         if self.history_filter.is_empty() {
             self.history_filtered.clear();
@@ -2681,20 +2636,6 @@ impl App {
     }
 }
 
-// ── Protocol detection ────────────────────────────────────────────────────────
-
-fn detect_image_protocol() -> ImageProtocol {
-    let term = std::env::var("TERM").unwrap_or_default();
-    let prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
-    let kitty = std::env::var("KITTY_WINDOW_ID").is_ok();
-
-    if kitty || term.contains("kitty") || prog.contains("WezTerm") || prog.contains("iTerm") {
-        ImageProtocol::Kitty
-    } else {
-        ImageProtocol::HalfBlock
-    }
-}
-
 // ── Fuzzy match ───────────────────────────────────────────────────────────────
 
 /// Returns true if every char in `needle` appears in `haystack` in order.
@@ -2720,17 +2661,4 @@ fn cycle_str<'a>(current: &str, opts: &[&'a str], step: i32) -> &'a str {
     let len = opts.len() as i32;
     let new_idx = ((idx as i32 + step).rem_euclid(len)) as usize;
     opts[new_idx]
-}
-
-/// Cycle through named color presets only (Custom excluded — use Enter for that).
-fn cycle_color(current: &str, _names: &[&str], step: i32) -> &'static str {
-    // Include Custom so arrow keys can land on it and open the text field
-    let presets: &[&str] = crate::config::COLOR_PRESET_NAMES;
-    let idx = presets
-        .iter()
-        .position(|&n| n == current)
-        .unwrap_or(presets.len() - 1); // non-preset values land on Custom
-    let len = presets.len() as i32;
-    let new_idx = ((idx as i32 + step).rem_euclid(len)) as usize;
-    presets[new_idx]
 }

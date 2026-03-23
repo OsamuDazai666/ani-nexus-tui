@@ -130,7 +130,7 @@ if (Test-Path (Join-Path $INSTALL_DIR ".git")) {
             Write-Info "Local Executable: $BIN_EXE"
             Write-Host ""
             Write-Host "  ◆ Nothing to do. Run " -ForegroundColor Gray -NoNewline
-            Write-Host "nexus" -ForegroundColor Cyan -NoNewline
+            Write-Host "ani-nexus" -ForegroundColor Cyan -NoNewline
             Write-Host " to launch." -ForegroundColor Gray
             Write-Host ""
             Read-Host "Press Enter to exit"
@@ -142,7 +142,7 @@ if (Test-Path (Join-Path $INSTALL_DIR ".git")) {
     Write-Info "$commits new commit(s) available"
     Write-Host ""
 
-    if (Ask-YesNo "Update nexus-tui?") {
+    if (Ask-YesNo "Update ani-nexus-tui?") {
         Write-Step "Pulling latest"
         git pull origin main --quiet 2>$null | Out-Null
         $newCommit = git rev-parse --short HEAD 2>$null
@@ -151,7 +151,7 @@ if (Test-Path (Join-Path $INSTALL_DIR ".git")) {
     } else {
         Write-Host ""
         Write-Host "  Skipped. Run " -ForegroundColor DarkGray -NoNewline
-        Write-Host "nexus" -ForegroundColor Cyan -NoNewline
+        Write-Host "ani-nexus" -ForegroundColor Cyan -NoNewline
         Write-Host " to launch." -ForegroundColor DarkGray
         Write-Host ""
         Read-Host "Press Enter to exit"
@@ -160,7 +160,7 @@ if (Test-Path (Join-Path $INSTALL_DIR ".git")) {
 } else {
     Write-Info "Install directory: $INSTALL_DIR"
     Write-Host ""
-    if (-not (Ask-YesNo "Install nexus-tui?")) {
+    if (-not (Ask-YesNo "Install ani-nexus-tui?")) {
         Write-Host ""; Write-Host "  Cancelled." -ForegroundColor DarkGray; Write-Host ""
         Read-Host "Press Enter to exit"
         exit 0
@@ -201,7 +201,7 @@ if (-not $hasRust) {
         if (Check-Command "rustc") { Write-OK "Rust installed" }
         else { Write-Fail "Rust install failed. Please install manually from https://rustup.rs" }
     } else {
-        Write-Fail "Rust is required to build nexus-tui."
+        Write-Fail "Rust is required to build ani-nexus-tui."
     }
 }
 
@@ -215,7 +215,7 @@ if (-not $skipClone) {
     $job = Start-Job { git clone --quiet $using:REPO_URL $using:INSTALL_DIR }
     $i = 0; $frames = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
     while ($job.State -eq "Running") {
-        Write-Host "`r    $($frames[$i % 10])  Cloning nexus-tui…" -NoNewline
+        Write-Host "`r    $($frames[$i % 10])  Cloning ani-nexus-tui…" -NoNewline
         Start-Sleep -Milliseconds 100; $i++
     }
     Write-Host "`r                                      `r" -NoNewline
@@ -227,7 +227,7 @@ if (-not $skipClone) {
 }
 
 # ── Build ─────────────────────────────────────────────────────────────────────
-Write-Step "Building nexus-tui"
+Write-Step "Building ani-nexus-tui"
 Write-Info "This takes 1–3 minutes on first build"
 Write-Host ""
 
@@ -281,7 +281,7 @@ Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━
 Write-Host "  " -NoNewline
 Write-Host "◆ " -ForegroundColor Yellow -NoNewline
 Write-Host "Done!  Run " -ForegroundColor White -NoNewline
-Write-Host "nexus" -ForegroundColor Cyan -NoNewline
+Write-Host "ani-nexus" -ForegroundColor Cyan -NoNewline
 Write-Host " to launch" -ForegroundColor White
 Write-Host ""
 Read-Host "Press Enter to exit"

@@ -151,11 +151,6 @@ pub async fn fetch_episode_list(show_id: &str, mode: &str) -> Result<Vec<String>
     episodes_list(show_id, mode).await
 }
 
-/// Simple fire-and-forget launch (no tracking). Used as a thin wrapper.
-pub fn launch_mpv_url(url: &str) -> Result<()> {
-    launch_mpv_tracked(url, "", "", 0.0, None, None, "none").map(|_| ())
-}
-
 /// Launch mpv with full tracking:
 /// - `--save-position-on-quit` into an isolated tmp dir → exact quit position
 /// - `observe_property` event stream → live position updates (~1s)
@@ -448,32 +443,6 @@ fn mpv_scripts_dir() -> Option<std::path::PathBuf> {
     }
     #[cfg(not(any(unix, windows)))]
     None
-}
-
-/// Send a seek command + OSD message through a fresh IPC connection.
-/// Used as fallback only — primary skip is handled by skip.lua.
-fn ipc_send_commands(socket: &str, seek_to: f64, osd_text: &str) {
-    use std::io::Write;
-
-    let cmds = format!(
-        "{{\"command\":[\"seek\",{seek_to:.3},\"absolute\"]}}\n\
-         {{\"command\":[\"show-text\",\"{osd_text}\",2000]}}\n"
-    );
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::net::UnixStream;
-        if let Ok(mut s) = UnixStream::connect(socket) {
-            let _ = s.write_all(cmds.as_bytes());
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::fs::OpenOptions;
-        if let Ok(mut f) = OpenOptions::new().read(true).write(true).open(socket) {
-            let _ = f.write_all(cmds.as_bytes());
-        }
-    }
 }
 
 /// One-shot IPC query — returns (time-pos, duration) from mpv socket/pipe.

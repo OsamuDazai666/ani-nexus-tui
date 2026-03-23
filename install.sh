@@ -61,12 +61,12 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
     if [[ "$LOCAL" == "$REMOTE" ]]; then
         ok "Already up to date"
         # Binary missing even though repo is current — rebuild
-        if [[ ! -f "${BIN_DIR}/nexus" ]]; then
+        if [[ ! -f "${BIN_DIR}/ani-nexus" ]]; then
             warn "Binary not found — rebuilding"
             println ""
         else
             println ""
-            info "Run nexus to launch"
+            info "Run ani-nexus to launch"
             println ""
             exit 0
         fi
@@ -76,7 +76,7 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "${COMMITS} new commit(s) available"
     println ""
 
-    if ! ask "Update nexus-tui?"; then
+    if ! ask "Update ani-nexus-tui?"; then
         println "\n  Skipped.\n"
         exit 0
     fi
@@ -92,7 +92,7 @@ else
     info "Install location: ${INSTALL_DIR}"
     println ""
 
-    if ! ask "Install nexus-tui?"; then
+    if ! ask "Install ani-nexus-tui?"; then
         println "\n  Cancelled.\n"
         exit 0
     fi
@@ -119,7 +119,7 @@ else
             source "${HOME}/.cargo/env" 2>/dev/null || true
             command -v rustc &>/dev/null && ok "Rust installed" || fail "Rust install failed — visit https://rustup.rs"
         else
-            fail "Rust is required to build nexus-tui"
+            fail "Rust is required to build ani-nexus-tui"
         fi
     fi
 
@@ -131,14 +131,14 @@ else
     mkdir -p "$(dirname "$INSTALL_DIR")"
 
     git clone --quiet "$REPO_URL" "$INSTALL_DIR" &
-    spin $! "Cloning nexus-tui…"
+    spin $! "Cloning ani-nexus-tui…"
     wait $!
     ok "Cloned to ${INSTALL_DIR}"
     println ""
 fi
 
 # ── Build ──────────────────────────────────────────────────────────────────────
-step "Building nexus-tui"
+step "Building ani-nexus-tui"
 info "First build takes 2–5 minutes"
 println ""
 
@@ -147,7 +147,7 @@ START=$(date +%s)
 
 source "${HOME}/.cargo/env" 2>/dev/null || true
 
-CARGO_INCREMENTAL=0 cargo build --release 2>/tmp/nexus_build_err &
+CARGO_INCREMENTAL=0 cargo build --release 2>/tmp/ani_nexus_build_err &
 BUILD_PID=$!
 spin $BUILD_PID "Compiling…"
 wait $BUILD_PID
@@ -158,7 +158,7 @@ END=$(date +%s)
 if [[ $BUILD_EXIT -ne 0 ]]; then
     println ""
     println "  ${RED}Build failed:${RESET}"
-    tail -20 /tmp/nexus_build_err | sed 's/^/    /'
+    tail -20 /tmp/ani_nexus_build_err | sed 's/^/    /'
     println ""
     fail "Fix the errors above and re-run the installer"
 fi

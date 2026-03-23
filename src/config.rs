@@ -19,30 +19,30 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             player: PlayerConfig::default(),
-            ui:     UiConfig::default(),
-            theme:  ThemeConfig::default(),
+            ui: UiConfig::default(),
+            theme: ThemeConfig::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerConfig {
-    pub mpv_path:           String,
-    pub extra_args:         Vec<String>,
-    pub stream_mode:        String,
-    pub quality:            String,
-    pub skip_segments:      String,
-    pub resume_offset_secs: u32,   // 0–60, default 5
+    pub mpv_path: String,
+    pub extra_args: Vec<String>,
+    pub stream_mode: String,
+    pub quality: String,
+    pub skip_segments: String,
+    pub resume_offset_secs: u32, // 0–60, default 5
 }
 
 impl Default for PlayerConfig {
     fn default() -> Self {
         Self {
-            mpv_path:           "mpv".to_string(),
-            extra_args:         vec!["--no-terminal".to_string()],
-            stream_mode:        "sub".to_string(),
-            quality:            "best".to_string(),
-            skip_segments:      "none".to_string(),
+            mpv_path: "mpv".to_string(),
+            extra_args: vec!["--no-terminal".to_string()],
+            stream_mode: "sub".to_string(),
+            quality: "best".to_string(),
+            skip_segments: "none".to_string(),
             resume_offset_secs: 5,
         }
     }
@@ -50,41 +50,41 @@ impl Default for PlayerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
-    pub image_protocol:   String,  // "auto"|"kitty"|"halfblock"
-    pub results_limit:    usize,
-    pub episode_cols:     String,  // "auto"|"2"|"3"
+    pub image_protocol: String, // "auto"|"kitty"|"halfblock"
+    pub results_limit: usize,
+    pub episode_cols: String, // "auto"|"2"|"3"
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
             image_protocol: "auto".to_string(),
-            results_limit:  25,
-            episode_cols:   "auto".to_string(),
+            results_limit: 25,
+            episode_cols: "auto".to_string(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThemeConfig {
-    pub accent:               String,
-    pub bar_progress:         String,
-    pub bar_complete:         String,
+    pub accent: String,
+    pub bar_progress: String,
+    pub bar_complete: String,
     #[serde(default)]
-    pub accent_custom:        Vec<String>,
+    pub accent_custom: Vec<String>,
     #[serde(default)]
-    pub bar_progress_custom:  Vec<String>,
+    pub bar_progress_custom: Vec<String>,
     #[serde(default)]
-    pub bar_complete_custom:  Vec<String>,
+    pub bar_complete_custom: Vec<String>,
 }
 
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            accent:              "Yellow".to_string(),
-            bar_progress:        "Yellow".to_string(),
-            bar_complete:        "Teal".to_string(),
-            accent_custom:       Vec::new(),
+            accent: "Yellow".to_string(),
+            bar_progress: "Yellow".to_string(),
+            bar_complete: "Teal".to_string(),
+            accent_custom: Vec::new(),
             bar_progress_custom: Vec::new(),
             bar_complete_custom: Vec::new(),
         }
@@ -95,13 +95,15 @@ impl Config {
     pub fn load() -> Self {
         match Self::try_load() {
             Ok(cfg) => cfg,
-            Err(_)  => Self::default(),
+            Err(_) => Self::default(),
         }
     }
 
     fn try_load() -> Result<Self> {
         let path = config_path();
-        if !path.exists() { return Ok(Self::default()); }
+        if !path.exists() {
+            return Ok(Self::default());
+        }
         let content = std::fs::read_to_string(&path)?;
         Ok(toml::from_str(&content)?)
     }
@@ -117,27 +119,24 @@ impl Config {
 
     pub fn write_sample() -> Result<()> {
         let path = config_path();
-        if path.exists() { return Ok(()); }
+        if path.exists() {
+            return Ok(());
+        }
         Self::default().save()
-    }
-
-    /// Parse accent string → RGB tuple
-    pub fn accent_rgb(accent: &str) -> (u8, u8, u8) {
-        Self::color_rgb(accent)
     }
 
     pub fn color_rgb(name: &str) -> (u8, u8, u8) {
         match name {
-            "Yellow" => (255, 255,   0),
-            "Cyan"   => (  0, 220, 255),
-            "Green"  => (  0, 255, 128),
-            "Orange" => (255, 140,   0),
-            "Pink"   => (255,  80, 180),
-            "Purple" => (160,  80, 255),
-            "Teal"   => (  0, 200, 150),
-            "Red"    => (255,  60,  60),
-            "White"  => (220, 220, 220),
-            custom   => parse_custom_color(custom).unwrap_or((255, 255, 0)),
+            "Yellow" => (255, 255, 0),
+            "Cyan" => (0, 220, 255),
+            "Green" => (0, 255, 128),
+            "Orange" => (255, 140, 0),
+            "Pink" => (255, 80, 180),
+            "Purple" => (160, 80, 255),
+            "Teal" => (0, 200, 150),
+            "Red" => (255, 60, 60),
+            "White" => (220, 220, 220),
+            custom => parse_custom_color(custom).unwrap_or((255, 255, 0)),
         }
     }
 }

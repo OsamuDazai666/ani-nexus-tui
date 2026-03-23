@@ -16,20 +16,20 @@ use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
-    pub id:                   String,
-    pub title:                String,
-    pub media_type:           String,
-    pub cover_url:            Option<String>,
-    pub last_watched:         DateTime<Utc>,
-    pub play_count:           u32,
-    pub user_rating:          Option<f32>,     // 0.0–10.0
-    pub notes:                Option<String>,
-    pub total_watch_seconds:  i64,
-    pub progress:             Option<u32>,     // last watched episode number
-    pub total:                Option<u32>,     // total episodes
+    pub id: String,
+    pub title: String,
+    pub media_type: String,
+    pub cover_url: Option<String>,
+    pub last_watched: DateTime<Utc>,
+    pub play_count: u32,
+    pub user_rating: Option<f32>, // 0.0–10.0
+    pub notes: Option<String>,
+    pub total_watch_seconds: i64,
+    pub progress: Option<u32>, // last watched episode number
+    pub total: Option<u32>,    // total episodes
 
     // Episode list cache
-    pub episodes_cache:            Option<Vec<String>>,
+    pub episodes_cache: Option<Vec<String>>,
     pub episodes_cache_updated_at: Option<DateTime<Utc>>,
 }
 
@@ -38,22 +38,26 @@ impl HistoryEntry {
         let total = match item {
             ContentItem::Anime(a) => {
                 let eps = a.total_episodes();
-                if eps > 0 { Some(eps) } else { None }
+                if eps > 0 {
+                    Some(eps)
+                } else {
+                    None
+                }
             }
         };
         Self {
-            id:                        item.id().to_string(),
-            title:                     item.title().to_string(),
-            media_type:                format!("{:?}", item.media_type()),
-            cover_url:                 item.cover_url().map(String::from),
-            last_watched:              Utc::now(),
-            play_count:                1,
-            user_rating:               None,
-            notes:                     None,
-            total_watch_seconds:       0,
-            progress:                  None,
+            id: item.id().to_string(),
+            title: item.title().to_string(),
+            media_type: format!("{:?}", item.media_type()),
+            cover_url: item.cover_url().map(String::from),
+            last_watched: Utc::now(),
+            play_count: 1,
+            user_rating: None,
+            notes: None,
+            total_watch_seconds: 0,
+            progress: None,
             total,
-            episodes_cache:            None,
+            episodes_cache: None,
             episodes_cache_updated_at: None,
         }
     }
@@ -66,9 +70,9 @@ impl HistoryEntry {
     }
 
     pub fn progress_bar(&self, width: usize) -> String {
-        let pct    = self.progress_pct().unwrap_or(0.0);
+        let pct = self.progress_pct().unwrap_or(0.0);
         let filled = (pct * width as f64) as usize;
-        let empty  = width.saturating_sub(filled);
+        let empty = width.saturating_sub(filled);
         format!("{}{}", "█".repeat(filled), "░".repeat(empty))
     }
 
@@ -85,31 +89,14 @@ impl HistoryEntry {
 
 #[derive(Debug, Clone)]
 pub struct EpisodeRecord {
-    pub anime_id:         String,
-    pub episode_number:   String,   // episode numbers can be "1", "1.5", "SP1" etc.
-    pub stream_url:       Option<String>,
-    pub watched:          bool,
-    pub watch_timestamp:  Option<DateTime<Utc>>,
-    pub position_seconds: f64,      // resume point
-    pub duration_seconds: f64,      // total duration (0 = unknown)
-    pub fully_watched:    bool,     // position > 95% of duration
-}
-
-impl EpisodeRecord {
-    pub fn progress_pct(&self) -> Option<f64> {
-        if self.duration_seconds > 0.0 {
-            Some((self.position_seconds / self.duration_seconds).clamp(0.0, 1.0))
-        } else {
-            None
-        }
-    }
-
-    /// Status icon for the episode list UI.
-    pub fn status_icon(&self) -> &'static str {
-        if self.fully_watched        { "✓" }
-        else if self.position_seconds > 5.0 { "▶" }
-        else                         { "·" }
-    }
+    pub anime_id: String,
+    pub episode_number: String, // episode numbers can be "1", "1.5", "SP1" etc.
+    pub stream_url: Option<String>,
+    pub watched: bool,
+    pub watch_timestamp: Option<DateTime<Utc>>,
+    pub position_seconds: f64, // resume point
+    pub duration_seconds: f64, // total duration (0 = unknown)
+    pub fully_watched: bool,   // position > 95% of duration
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────────
@@ -122,18 +109,21 @@ impl HistoryStore {
     pub fn open() -> Result<Self> {
         let path = db_path();
         std::fs::create_dir_all(path.parent().unwrap())?;
-        let conn = Connection::open(&path)
-            .with_context(|| format!("opening SQLite DB at {path:?}"))?;
+        let conn =
+            Connection::open(&path).with_context(|| format!("opening SQLite DB at {path:?}"))?;
 
         // WAL mode — safe for concurrent reads from the async runtime
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         Self::migrate(&conn)?;
 
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn migrate(conn: &Connection) -> Result<()> {
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS anime (
                 id                        TEXT PRIMARY KEY,
                 title                     TEXT NOT NULL,
@@ -164,7 +154,8 @@ impl HistoryStore {
 
             CREATE INDEX IF NOT EXISTS idx_anime_last_watched ON anime(last_watched DESC);
             CREATE INDEX IF NOT EXISTS idx_episodes_anime     ON episodes(anime_id);
-        ")?;
+        ",
+        )?;
         Ok(())
     }
 
@@ -197,7 +188,9 @@ impl HistoryStore {
                 entry.total_watch_seconds,
                 entry.progress.map(|p| p as i64),
                 entry.total.map(|t| t as i64),
-                entry.episodes_cache.as_ref()
+                entry
+                    .episodes_cache
+                    .as_ref()
                     .map(|v| serde_json::to_string(v).unwrap_or_default()),
                 entry.episodes_cache_updated_at.map(|t| t.timestamp()),
             ],
@@ -220,24 +213,6 @@ impl HistoryStore {
         Ok(())
     }
 
-    pub fn update_rating(&self, id: &str, rating: Option<f32>) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE anime SET user_rating = ?1 WHERE id = ?2",
-            params![rating, id],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_notes(&self, id: &str, notes: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE anime SET notes = ?1 WHERE id = ?2",
-            params![notes, id],
-        )?;
-        Ok(())
-    }
-
     /// Store the fetched episode list and mark cache timestamp.
     pub fn save_episodes_cache(&self, id: &str, episodes: &[String]) -> Result<()> {
         let json = serde_json::to_string(episodes)?;
@@ -245,16 +220,6 @@ impl HistoryStore {
         conn.execute(
             "UPDATE anime SET episodes_cache = ?1, episodes_cache_updated_at = ?2 WHERE id = ?3",
             params![json, Utc::now().timestamp(), id],
-        )?;
-        Ok(())
-    }
-
-    /// Add seconds to the anime's total watch time.
-    pub fn add_watch_time(&self, id: &str, seconds: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE anime SET total_watch_seconds = total_watch_seconds + ?1 WHERE id = ?2",
-            params![seconds, id],
         )?;
         Ok(())
     }
@@ -268,7 +233,10 @@ impl HistoryStore {
              FROM anime ORDER BY last_watched DESC",
         )?;
 
-        let entries = stmt.query_map([], row_to_entry)?.filter_map(|r| r.ok()).collect();
+        let entries = stmt
+            .query_map([], row_to_entry)?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(entries)
     }
 
@@ -316,16 +284,6 @@ impl HistoryStore {
         Ok(())
     }
 
-    /// Update just the playback position and duration — called from the IPC poller.
-    pub fn mark_fully_watched(&self, anime_id: &str, episode_number: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE episodes SET fully_watched = 1, watched = 1 WHERE anime_id = ?1 AND episode_number = ?2",
-            params![anime_id, episode_number],
-        )?;
-        Ok(())
-    }
-
     pub fn update_position(
         &self,
         anime_id: &str,
@@ -364,18 +322,31 @@ impl HistoryStore {
              FROM episodes WHERE anime_id = ?1
              ORDER BY CAST(episode_number AS REAL)",
         )?;
-        let recs = stmt.query_map(params![anime_id], row_to_episode)?.filter_map(|r| r.ok()).collect();
+        let recs = stmt
+            .query_map(params![anime_id], row_to_episode)?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(recs)
     }
 
     /// Load only the episode records for the given episode number strings.
     /// Used for windowed/paginated rendering — avoids loading 1000+ records.
-    pub fn load_episodes_in(&self, anime_id: &str, episode_numbers: &[&str]) -> Result<Vec<EpisodeRecord>> {
-        if episode_numbers.is_empty() { return Ok(vec![]); }
+    pub fn load_episodes_in(
+        &self,
+        anime_id: &str,
+        episode_numbers: &[&str],
+    ) -> Result<Vec<EpisodeRecord>> {
+        if episode_numbers.is_empty() {
+            return Ok(vec![]);
+        }
         let conn = self.conn.lock().unwrap();
 
         // rusqlite anonymous ? params — one per episode plus one for anime_id
-        let placeholders = episode_numbers.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders = episode_numbers
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "SELECT anime_id, episode_number, stream_url, watched, watch_timestamp,
                     position_seconds, duration_seconds, fully_watched
@@ -391,7 +362,8 @@ impl HistoryStore {
         }
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
-        let recs = stmt.query_map(param_refs.as_slice(), row_to_episode)?
+        let recs = stmt
+            .query_map(param_refs.as_slice(), row_to_episode)?
             .filter_map(|r| r.ok())
             .collect();
         Ok(recs)
@@ -417,18 +389,18 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
     let cache_json: Option<String> = row.get(11)?;
 
     Ok(HistoryEntry {
-        id:                        row.get(0)?,
-        title:                     row.get(1)?,
-        media_type:                row.get(2)?,
-        cover_url:                 row.get(3)?,
-        last_watched:              DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now),
-        play_count:                row.get::<_, i64>(5)? as u32,
-        user_rating:               row.get(6)?,
-        notes:                     row.get(7)?,
-        total_watch_seconds:       row.get(8)?,
-        progress:                  row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
-        total:                     row.get::<_, Option<i64>>(10)?.map(|v| v as u32),
-        episodes_cache:            cache_json.and_then(|j| serde_json::from_str(&j).ok()),
+        id: row.get(0)?,
+        title: row.get(1)?,
+        media_type: row.get(2)?,
+        cover_url: row.get(3)?,
+        last_watched: DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now),
+        play_count: row.get::<_, i64>(5)? as u32,
+        user_rating: row.get(6)?,
+        notes: row.get(7)?,
+        total_watch_seconds: row.get(8)?,
+        progress: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
+        total: row.get::<_, Option<i64>>(10)?.map(|v| v as u32),
+        episodes_cache: cache_json.and_then(|j| serde_json::from_str(&j).ok()),
         episodes_cache_updated_at: cache_ts.and_then(|t| DateTime::from_timestamp(t, 0)),
     })
 }
@@ -436,14 +408,14 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
 fn row_to_episode(row: &rusqlite::Row<'_>) -> rusqlite::Result<EpisodeRecord> {
     let ts: Option<i64> = row.get(4)?;
     Ok(EpisodeRecord {
-        anime_id:         row.get(0)?,
-        episode_number:   row.get(1)?,
-        stream_url:       row.get(2)?,
-        watched:          row.get::<_, i64>(3)? != 0,
-        watch_timestamp:  ts.and_then(|t| DateTime::from_timestamp(t, 0)),
+        anime_id: row.get(0)?,
+        episode_number: row.get(1)?,
+        stream_url: row.get(2)?,
+        watched: row.get::<_, i64>(3)? != 0,
+        watch_timestamp: ts.and_then(|t| DateTime::from_timestamp(t, 0)),
         position_seconds: row.get(5)?,
         duration_seconds: row.get(6)?,
-        fully_watched:    row.get::<_, i64>(7)? != 0,
+        fully_watched: row.get::<_, i64>(7)? != 0,
     })
 }
 
