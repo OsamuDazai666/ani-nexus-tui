@@ -57,11 +57,15 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(image_picker).await?;
-    let result  = run(&mut terminal, &mut app).await;
+    let result = run(&mut terminal, &mut app).await;
 
     // Always restore terminal, even on error
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     if let Err(ref e) = result {
@@ -84,9 +88,11 @@ async fn run<B: ratatui::backend::Backend>(
 
         // Run mpv on the main thread — the only way to safely do terminal teardown/restore.
         // pending_mpv is set by handle_msg(LaunchMpv) or handle_msg(StreamUrl).
-        if let Some((url, anime_id, episode, resume_from, skip_times, skip_setting)) = app.pending_mpv.take() {
-            let db  = app.db.clone();
-            let tx  = app.msg_tx.clone();
+        if let Some((url, anime_id, episode, resume_from, skip_times, skip_setting)) =
+            app.pending_mpv.take()
+        {
+            let db = app.db.clone();
+            let tx = app.msg_tx.clone();
 
             crossterm::terminal::disable_raw_mode()?;
             crossterm::execute!(
@@ -95,7 +101,8 @@ async fn run<B: ratatui::backend::Backend>(
                 crossterm::event::DisableMouseCapture,
             )?;
 
-            let (pb_tx, mut pb_rx) = tokio::sync::mpsc::unbounded_channel::<player::PlaybackEvent>();
+            let (pb_tx, mut pb_rx) =
+                tokio::sync::mpsc::unbounded_channel::<player::PlaybackEvent>();
             let tx_fwd = tx.clone();
             tokio::spawn(async move {
                 while let Some(ev) = pb_rx.recv().await {
@@ -104,8 +111,15 @@ async fn run<B: ratatui::backend::Backend>(
             });
 
             let (pos, dur) = player::launch_mpv_tracked(
-                &url, &anime_id, &episode, resume_from, Some(pb_tx), skip_times, &skip_setting,
-            ).unwrap_or((0.0, 0.0));
+                &url,
+                &anime_id,
+                &episode,
+                resume_from,
+                Some(pb_tx),
+                skip_times,
+                &skip_setting,
+            )
+            .unwrap_or((0.0, 0.0));
 
             // Restore ratatui
             crossterm::terminal::enable_raw_mode()?;
@@ -120,13 +134,16 @@ async fn run<B: ratatui::backend::Backend>(
                 // If no watch_later file was written (natural end), force fully_watched
                 // when position covers 80%+ of duration
                 let effective_pos = if dur > 0.0 && pos > 0.0 && pos / dur >= 0.80 {
-                    dur  // treat as fully watched — store position = duration
+                    dur // treat as fully watched — store position = duration
                 } else {
                     pos
                 };
                 let _ = db.update_position(&anime_id, &episode, effective_pos, dur);
                 let _ = tx.send(AppMsg::Playback(player::PlaybackEvent::Finished {
-                    anime_id, episode, position: effective_pos, duration: dur,
+                    anime_id,
+                    episode,
+                    position: effective_pos,
+                    duration: dur,
                 }));
             }
 

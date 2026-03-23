@@ -8,19 +8,27 @@ pub enum ContentItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MediaType { Anime }
+pub enum MediaType {
+    Anime,
+}
 
 impl ContentItem {
     pub fn id(&self) -> &str {
-        match self { ContentItem::Anime(a) => &a.id }
+        match self {
+            ContentItem::Anime(a) => &a.id,
+        }
     }
 
     pub fn title(&self) -> &str {
-        match self { ContentItem::Anime(a) => a.display_title() }
+        match self {
+            ContentItem::Anime(a) => a.display_title(),
+        }
     }
 
     pub fn cover_url(&self) -> Option<&str> {
-        match self { ContentItem::Anime(a) => a.thumbnail.as_deref() }
+        match self {
+            ContentItem::Anime(a) => a.thumbnail.as_deref(),
+        }
     }
 
     pub fn synopsis(&self) -> &str {
@@ -30,15 +38,21 @@ impl ContentItem {
     }
 
     pub fn score(&self) -> Option<f32> {
-        match self { ContentItem::Anime(a) => a.score }
+        match self {
+            ContentItem::Anime(a) => a.score,
+        }
     }
 
     pub fn year(&self) -> Option<i32> {
-        match self { ContentItem::Anime(a) => a.year }
+        match self {
+            ContentItem::Anime(a) => a.year,
+        }
     }
 
     pub fn genres(&self) -> Vec<&str> {
-        match self { ContentItem::Anime(a) => a.genres.iter().map(String::as_str).collect() }
+        match self {
+            ContentItem::Anime(a) => a.genres.iter().map(String::as_str).collect(),
+        }
     }
 
     pub fn episodes_or_chapters(&self) -> Option<String> {
@@ -57,14 +71,20 @@ impl ContentItem {
     }
 
     pub fn status(&self) -> Option<&str> {
-        match self { ContentItem::Anime(a) => a.status.as_deref() }
+        match self {
+            ContentItem::Anime(a) => a.status.as_deref(),
+        }
     }
 
     pub fn media_type(&self) -> MediaType {
-        match self { ContentItem::Anime(_) => MediaType::Anime }
+        match self {
+            ContentItem::Anime(_) => MediaType::Anime,
+        }
     }
 
     pub fn source_badge(&self) -> &str {
-        match self { ContentItem::Anime(_) => "AllAnime" }
+        match self {
+            ContentItem::Anime(_) => "AllAnime",
+        }
     }
 }
