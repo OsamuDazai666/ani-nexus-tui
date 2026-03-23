@@ -275,7 +275,7 @@ fn draw_color_row(
     let mut y = area.y;
     let max_x = area.x + area.width;
 
-    let mut render_cell = |f: &mut Frame, label: &str, bg: Color, is_cur: bool,
+    let render_cell = |f: &mut Frame, label: &str, bg: Color, is_cur: bool,
                             is_active: bool, deletable: bool, x: &mut u16, y: &mut u16| {
         let cell_w = label.chars().count() as u16 + 2; // padding
         // Wrap if needed — cells are 3 tall so each new line is +3
@@ -398,9 +398,30 @@ fn draw_color_row(
             input_inner,
         );
     } else {
-        // [+] button
-        let bg = if is_add_cur && selected { Color::Rgb(40,40,40) } else { Color::Rgb(25,25,25) };
-        render_cell(f, "+", bg, is_add_cur, false, false, &mut x, &mut y);
+        // [+] button — same fixed width as the input cell so no jitter when switching
+        let bg = if is_add_cur && selected { Color::Rgb(50, 50, 50) } else { Color::Rgb(25, 25, 25) };
+        // Wrap check
+        if x + input_cell_w > max_x && x > area.x { y += 3; x = area.x; }
+        let cell_rect = Rect { x, y, width: input_cell_w, height: 3 };
+        let border_col = if is_add_cur && selected {
+            Color::Rgb(255, 255, 255)
+        } else {
+            Color::Rgb(40, 40, 40)
+        };
+        let btn_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_col))
+            .style(Style::default().bg(bg));
+        let btn_inner = btn_block.inner(cell_rect);
+        f.render_widget(btn_block, cell_rect);
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  +  ",
+                Style::default().fg(Color::Rgb(120, 120, 120)).bg(bg)
+                    .add_modifier(if is_add_cur && selected { Modifier::BOLD } else { Modifier::empty() }),
+            )).style(Style::default().bg(bg)),
+            btn_inner,
+        );
     }
 
     (y - area.y) + 3  // total height used
@@ -434,16 +455,18 @@ fn draw_playback(f: &mut Frame, app: &App, area: Rect, edit: bool, accent: Color
         toggle_line(&cfg.stream_mode, &["sub","dub"], accent, sel(0)), sel(0), accent);
     y = draw_row(f, area, y, "Stream quality",
         toggle_line(&cfg.quality, &["best","1080","720","480"], accent, sel(1)), sel(1), accent);
+    y = draw_row(f, area, y, "Skip segments",
+        toggle_line(&cfg.skip_segments, &["none","intro","outro","both"], accent, sel(2)), sel(2), accent);
     y = draw_row(f, area, y, "MPV path",
-        text_line(&cfg.mpv_path, app.settings_editing && sel(2), &app.settings_input, accent),
-        sel(2), accent);
-    draw_row(f, area, y, "Extra MPV args",
-        text_line(&cfg.extra_args.join(" "), app.settings_editing && sel(3), &app.settings_input, accent),
+        text_line(&cfg.mpv_path, app.settings_editing && sel(3), &app.settings_input, accent),
         sel(3), accent);
+    draw_row(f, area, y, "Extra MPV args",
+        text_line(&cfg.extra_args.join(" "), app.settings_editing && sel(4), &app.settings_input, accent),
+        sel(4), accent);
 }
 
 fn draw_theme(f: &mut Frame, app: &App, area: Rect, edit: bool, accent: Color) {
-    let cfg = &app.config.theme;
+    let _cfg = &app.config.theme;
     let mut y = 0u16;
     let sel = |r| edit && app.settings_row == r && app.settings_category == 1;
 

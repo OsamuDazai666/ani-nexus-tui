@@ -73,10 +73,12 @@ pub enum AppMsg {
     EpisodeList { id: String, eps: Vec<String> },
     HistoryEpisodeList { anime_id: String, eps: Vec<String> },
     AnimeEpisodeRecords { anime_id: String, records: Vec<EpisodeRecord> },
+    MalIdResolved(Option<u32>),
+    SkipTimesReady(Option<crate::api::allanime::SkipTimes>),
     /// Windowed episode records loaded from DB
     EpisodeWindowLoaded { anime_id: String, start: usize, end: usize, records: Vec<EpisodeRecord> },
     /// Request main loop to launch mpv synchronously (terminal-safe)
-    LaunchMpv { url: String, anime_id: String, episode: String, resume_from: f64 },
+    LaunchMpv { url: String, anime_id: String, episode: String, resume_from: f64, skip_times: Option<crate::api::allanime::SkipTimes>, skip_setting: String },
     Playback(PlaybackEvent),
     Error(String),
 }
@@ -147,7 +149,7 @@ pub struct App {
     pub cover_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
     pub needs_redraw: bool,
     /// Set by handle_msg(LaunchMpv) — consumed by main loop to run mpv on main thread
-    pub pending_mpv: Option<(String, String, String, f64)>, // (url, anime_id, episode, resume)
+    pub pending_mpv: Option<(String, String, String, f64, Option<crate::api::allanime::SkipTimes>, String)>, // (url, anime_id, episode, resume, skip_times, skip_setting)
 
     // Settings
     pub config:            crate::config::Config,
@@ -159,6 +161,10 @@ pub struct App {
     pub prev_tab:          Tab,
     /// Cursor position within each color row's swatch list [accent, progress, complete]
     pub settings_color_idx: [usize; 3],
+    /// MAL ID for the currently selected anime (resolved async for AniSkip)
+    pub mal_id:   Option<u32>,
+    /// Skip timestamps for the currently playing episode
+    pub skip_times: Option<crate::api::allanime::SkipTimes>,
 
     // ── In-memory caches ──────────────────────────────────────────────────────
     pub image_cache:  std::collections::HashMap<String, Vec<u8>>,
@@ -240,6 +246,8 @@ impl App {
             settings_error:    None,
             prev_tab:          Tab::Anime,
             settings_color_idx: [0, 0, 0],
+            mal_id:    None,
+            skip_times: None,
             image_cache:       std::collections::HashMap::new(),
             image_cache_order: std::collections::VecDeque::new(),
             detail_cache:       std::collections::HashMap::new(),
@@ -355,13 +363,14 @@ impl App {
                 self.status = "Playing".to_string();
                 self.toast_success("Launching mpv…");
                 // Defer to main loop for terminal-safe launch
-                self.pending_mpv = Some((url, String::new(), String::new(), 0.0));
+                self.pending_mpv = Some((url, String::new(), String::new(), 0.0, None, "none".to_string()));
                 self.needs_redraw = true;
             }
 
-            AppMsg::LaunchMpv { url, anime_id, episode, resume_from } => {
+            AppMsg::LaunchMpv { url, anime_id, episode, resume_from, skip_times, skip_setting } => {
                 self.toast_success("Launching mpv…");
-                self.pending_mpv = Some((url, anime_id, episode, resume_from));
+                crate::api::allanime::skip_log(&format!("[nexus-skip] LaunchMpv: skip_setting={skip_setting} skip_times_some={}", skip_times.is_some()));
+                self.pending_mpv = Some((url, anime_id, episode, resume_from, skip_times, skip_setting));
                 self.needs_redraw = true;
             }
             AppMsg::EpisodeWindowLoaded { anime_id, start, end, records } => {
@@ -376,13 +385,25 @@ impl App {
             }
 
             AppMsg::AnimeEpisodeRecords { anime_id, records } => {
-                // Only apply if this anime is still selected
                 if self.selected.as_ref().map(|s| s.id() == anime_id).unwrap_or(false) {
                     self.anime_episode_records.clear();
                     for rec in records {
                         self.anime_episode_records.insert(rec.episode_number.clone(), rec);
                     }
                 }
+            }
+
+            AppMsg::MalIdResolved(id) => {
+                crate::api::allanime::skip_log(&format!("[nexus-skip] MAL ID resolved: {:?}", id));
+                self.mal_id = id;
+            }
+
+            AppMsg::SkipTimesReady(times) => {
+                crate::api::allanime::skip_log(&format!("[nexus-skip] SkipTimesReady: intro={} outro={}",
+                    times.as_ref().map(|t| t.intro.is_some()).unwrap_or(false),
+                    times.as_ref().map(|t| t.outro.is_some()).unwrap_or(false)),
+                );
+                self.skip_times = times;
             }
 
             AppMsg::HistoryEpisodeList { anime_id, eps } => {
@@ -917,6 +938,9 @@ impl App {
             _ => {}
         }
 
+        if key.code == KeyCode::Enter {
+            crate::api::allanime::skip_log(&format!("[nexus-skip] Enter pressed at focus={:?}", self.focus));
+        }
         match self.focus.clone() {
             Focus::Search          => self.key_search(key).await?,
             Focus::Results         => self.key_results(key).await?,
@@ -1211,7 +1235,6 @@ impl App {
                     .map(|r| r.position_seconds)
                     .unwrap_or(0.0);
 
-                // Get stream URL if already saved in DB
                 let saved_url = ep_record.and_then(|r| r.stream_url);
 
                 let anime_id  = entry.id.clone();
@@ -1220,46 +1243,76 @@ impl App {
                 let mode      = self.stream_mode.clone();
                 let quality   = self.stream_quality.clone();
                 let db        = self.db.clone();
+                let skip_setting = self.config.player.skip_segments.clone();
+                // Use already-resolved mal_id if available, otherwise try entry title
+                let mal_id_opt = self.mal_id;
+                let entry_title = entry.title.clone();
 
                 self.toast_info(format!("Loading Ep {ep_str}…"));
 
-                if let Some(url) = saved_url {
-                    // Already have URL — send directly to main loop
-                    let _ = self.msg_tx.send(AppMsg::LaunchMpv {
-                        url,
-                        anime_id: anime_id.clone(),
-                        episode:  ep_clone.clone(),
-                        resume_from,
-                    });
-                } else {
-                    // Resolve URL first, then send LaunchMpv
-                    let ep_num: u32 = ep_str.parse().unwrap_or(1);
-                    let tx_app = tx.clone();
-                    tokio::spawn(async move {
-                        match player::stream_anime(&anime_id, ep_num, &mode, &quality).await {
-                            Ok(url) => {
-                                let rec = crate::db::history::EpisodeRecord {
-                                    anime_id:         anime_id.clone(),
-                                    episode_number:   ep_clone.clone(),
-                                    stream_url:       Some(url.clone()),
-                                    watched:          true,
-                                    watch_timestamp:  Some(chrono::Utc::now()),
-                                    position_seconds: 0.0,
-                                    duration_seconds: 0.0,
-                                    fully_watched:    false,
-                                };
-                                let _ = db.save_episode(&rec);
-                                let _ = tx_app.send(AppMsg::LaunchMpv {
-                                    url,
-                                    anime_id,
-                                    episode: ep_clone,
-                                    resume_from,
-                                });
-                            }
-                            Err(e) => { let _ = tx_app.send(AppMsg::Error(e.to_string())); }
+                let ep_num: u32 = ep_str.parse().unwrap_or(1);
+                let tx_app = tx.clone();
+                tokio::spawn(async move {
+                    // Resolve MAL ID if we don't have it yet
+                    let mid = if mal_id_opt.is_some() {
+                        mal_id_opt
+                    } else if skip_setting != "none" {
+                        crate::api::allanime::skip_log(&format!("[nexus-skip] resolving MAL ID from title: {entry_title}"));
+                        crate::api::allanime::resolve_mal_id(&entry_title).await
+                    } else {
+                        None
+                    };
+                    crate::api::allanime::skip_log(&format!("[nexus-skip] History launch: skip_setting={skip_setting} mal_id={mid:?} ep={ep_num}"));
+
+                    // Fetch skip times and stream URL concurrently
+                    let skip_fut = async {
+                        if skip_setting != "none" {
+                            if let Some(m) = mid {
+                                crate::api::allanime::skip_log(&format!("[nexus-skip] fetching skip times for mal_id={m} ep={ep_num}"));
+                                let r = crate::api::allanime::fetch_skip_times(m, ep_num).await;
+                                crate::api::allanime::skip_log(&format!("[nexus-skip] fetch: intro={} outro={}",
+                                    r.as_ref().map(|t| t.intro.is_some()).unwrap_or(false),
+                                    r.as_ref().map(|t| t.outro.is_some()).unwrap_or(false)));
+                                r
+                            } else { None }
+                        } else { None }
+                    };
+
+                    let url_fut = async {
+                        if let Some(url) = saved_url {
+                            Ok(url)
+                        } else {
+                            player::stream_anime(&anime_id, ep_num, &mode, &quality).await
                         }
-                    });
-                }
+                    };
+
+                    let (url_result, skip_times) = tokio::join!(url_fut, skip_fut);
+
+                    match url_result {
+                        Ok(url) => {
+                            let rec = crate::db::history::EpisodeRecord {
+                                anime_id:         anime_id.clone(),
+                                episode_number:   ep_clone.clone(),
+                                stream_url:       Some(url.clone()),
+                                watched:          true,
+                                watch_timestamp:  Some(chrono::Utc::now()),
+                                position_seconds: 0.0,
+                                duration_seconds: 0.0,
+                                fully_watched:    false,
+                            };
+                            let _ = db.save_episode(&rec);
+                            let _ = tx_app.send(AppMsg::LaunchMpv {
+                                url,
+                                anime_id,
+                                episode: ep_clone,
+                                resume_from,
+                                skip_times,
+                                skip_setting: skip_setting.clone(),
+                            });
+                        }
+                        Err(e) => { let _ = tx_app.send(AppMsg::Error(e.to_string())); }
+                    }
+                });
 
                 // Update progress in DB and in memory
                 let ep_num: u32 = ep_str.parse().unwrap_or(0);
@@ -1277,7 +1330,7 @@ impl App {
 
     /// Rebuild history_filtered from history_filter using fuzzy match.
     async fn key_settings(&mut self, key: KeyEvent) -> Result<()> {
-        use crate::config::parse_custom_color;
+
 
         // ── Text edit mode ────────────────────────────────────────────────────
         if self.settings_editing {
@@ -1307,8 +1360,8 @@ impl App {
                     } else {
                         let input = self.settings_input.trim().to_string();
                         match (self.settings_category, self.settings_row) {
-                            (0, 2) => { self.config.player.mpv_path = input; }
-                            (0, 3) => {
+                            (0, 3) => { self.config.player.mpv_path = input; }
+                            (0, 4) => {
                                 self.config.player.extra_args =
                                     input.split_whitespace().map(String::from).collect();
                             }
@@ -1423,7 +1476,7 @@ impl App {
 
     fn settings_max_rows(&self) -> usize {
         match self.settings_category {
-            0 => 4,  // audio, quality, mpv_path, extra_args
+            0 => 5,  // audio, quality, skip, mpv_path, extra_args
             1 => 4,  // accent, progress_bar, complete_bar, reset
             2 => 3,  // image_protocol, results_limit, episode_cols
             3 => 1,
@@ -1433,13 +1486,13 @@ impl App {
 
     fn settings_is_text_field(&self) -> bool {
         matches!((self.settings_category, self.settings_row),
-            (0, 2) | (0, 3))
+            (0, 3) | (0, 4))  // mpv_path, extra_args (after skip row)
     }
 
     fn settings_current_text_value(&self) -> String {
         match (self.settings_category, self.settings_row) {
-            (0, 2) => self.config.player.mpv_path.clone(),
-            (0, 3) => self.config.player.extra_args.join(" "),
+            (0, 3) => self.config.player.mpv_path.clone(),
+            (0, 4) => self.config.player.extra_args.join(" "),
             (1, 1) => {
                 let accent = &self.config.theme.accent;
                 if crate::config::COLOR_PRESET_NAMES.contains(&accent.as_str()) {
@@ -1467,6 +1520,11 @@ impl App {
                 self.config.player.quality =
                     cycle_str(&self.config.player.quality.clone(), &opts, step).into();
                 self.stream_quality = self.config.player.quality.clone();
+            }
+            (0, 2) => {
+                let opts = ["none", "intro", "outro", "both"];
+                self.config.player.skip_segments =
+                    cycle_str(&self.config.player.skip_segments.clone(), &opts, step).into();
             }
             // Theme: accent color (←/→ moves cursor, Enter/→ on + cell opens input)
             (1, 0) => { self.settings_color_move(0, step); }
@@ -1808,7 +1866,8 @@ impl App {
     // ── Detail ────────────────────────────────────────────────────────────────
 
     fn load_detail(&mut self, item: ContentItem) {
-        let item_id = item.id().to_string();
+        let item_id    = item.id().to_string();
+        let item_title = item.title().to_string();
 
         // ── Cover image ───────────────────────────────────────────────────────
         self.cover_protocol = None;
@@ -1898,7 +1957,7 @@ impl App {
 
         let _ = self.msg_tx.send(AppMsg::DetailLoaded(item));
 
-        // ── Load per-episode progress from DB for the progress fill display ───
+        // ── Load per-episode progress from DB ────────────────────────────────
         self.anime_episode_records.clear();
         let db  = self.db.clone();
         let tx  = self.msg_tx.clone();
@@ -1910,11 +1969,23 @@ impl App {
                 }
             }
         });
+
+        // ── Resolve MAL ID for AniSkip (async, best-effort) ──────────────────
+        self.mal_id = None;
+        let tx2    = self.msg_tx.clone();
+        let title  = item_title.clone();
+        tokio::spawn(async move {
+            crate::api::allanime::skip_log(&format!("[nexus-skip] resolving MAL ID for title: {title}"));
+            let id = crate::api::allanime::resolve_mal_id(&title).await;
+            crate::api::allanime::skip_log(&format!("[nexus-skip] MAL ID resolved: {id:?}"));
+            let _ = tx2.send(AppMsg::MalIdResolved(id));
+        });
     }
 
     // ── Playback ──────────────────────────────────────────────────────────────
 
     pub async fn resolve_and_play(&mut self) {
+        crate::api::allanime::skip_log(&format!("[nexus-skip] resolve_and_play called, selected={}", self.selected.is_some()));
         if self.selected.is_none() {
             self.toast_info("Select something first");
             return;
@@ -1988,6 +2059,7 @@ impl App {
             KeyCode::Enter => {
                 let ep_str = self.episode_input.trim().to_string();
                 let ep: u32 = ep_str.parse().unwrap_or(1);
+                crate::api::allanime::skip_log(&format!("[nexus-skip] Enter pressed: ep={ep} ep_str={ep_str} selected={}", self.selected.is_some()));
                 self.focus = Focus::Detail;
                 if let Some(item) = self.selected.clone() {
                     let tx   = self.msg_tx.clone();
@@ -2013,8 +2085,39 @@ impl App {
                         self.toast_info(format!("Fetching ep {ep} [{mode}]…"));
                     }
 
+                    // Fetch skip times AND stream URL together in one spawn
+                    // so both are ready before LaunchMpv fires — no race condition
+                    let skip_setting = self.config.player.skip_segments.clone();
+                    let mal_id_opt   = self.mal_id;
+                    crate::api::allanime::skip_log(&format!("[nexus-skip] Spawning: skip_setting={skip_setting} mal_id={mal_id_opt:?} ep={ep}"));
+
                     tokio::spawn(async move {
-                        match player::stream_anime(&id, ep, &mode, &quality).await {
+                        let skip_fut = async {
+                            if skip_setting != "none" {
+                                if let Some(mid) = mal_id_opt {
+                                    crate::api::allanime::skip_log(&format!("[nexus-skip] fetching skip times for mal_id={mid} ep={ep}"));
+                                    let result = crate::api::allanime::fetch_skip_times(mid, ep).await;
+                                    crate::api::allanime::skip_log(&format!("[nexus-skip] fetch result: intro={} outro={}",
+                                        result.as_ref().map(|t| t.intro.is_some()).unwrap_or(false),
+                                        result.as_ref().map(|t| t.outro.is_some()).unwrap_or(false)),
+                                    );
+                                    result
+                                } else {
+                                    crate::api::allanime::skip_log("[nexus-skip] no MAL ID — cannot fetch skip times");
+                                    None
+                                }
+                            } else {
+                                crate::api::allanime::skip_log("[nexus-skip] skip disabled");
+                                None
+                            }
+                        };
+
+                        let (stream_result, skip_times) = tokio::join!(
+                            player::stream_anime(&id, ep, &mode, &quality),
+                            skip_fut,
+                        );
+
+                        match stream_result {
                             Ok(url) => {
                                 // Save anime to history
                                 let entry = HistoryEntry::from_content(&item);
@@ -2031,7 +2134,6 @@ impl App {
                                     fully_watched:    false,
                                 };
                                 let _ = db.save_episode(&rec);
-                                // Use LaunchMpv so tracking works (anime_id + episode filled in)
                                 let ep_num = ep;
                                 let _ = db.update_progress(&entry.id, ep_num);
                                 let _ = tx.send(AppMsg::LaunchMpv {
@@ -2039,6 +2141,8 @@ impl App {
                                     anime_id: entry.id,
                                     episode:  ep.to_string(),
                                     resume_from,
+                                    skip_times,
+                                    skip_setting,
                                 });
                             }
                             Err(e) => { let _ = tx.send(AppMsg::Error(e.to_string())); }

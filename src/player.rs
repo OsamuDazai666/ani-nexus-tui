@@ -61,7 +61,7 @@ pub async fn fetch_episode_list(show_id: &str, mode: &str) -> Result<Vec<String>
 
 /// Simple fire-and-forget launch (no tracking). Used as a thin wrapper.
 pub fn launch_mpv_url(url: &str) -> Result<()> {
-    launch_mpv_tracked(url, "", "", 0.0, None).map(|_| ())
+    launch_mpv_tracked(url, "", "", 0.0, None, None, "none").map(|_| ())
 }
 
 /// Launch mpv with full tracking:
@@ -71,11 +71,13 @@ pub fn launch_mpv_url(url: &str) -> Result<()> {
 /// The caller (main loop) is responsible for terminal teardown before calling
 /// this and restore afterwards. Returns `(quit_position_seconds, duration_seconds)`.
 pub fn launch_mpv_tracked(
-    url:         &str,
-    anime_id:    &str,
-    episode:     &str,
-    resume_from: f64,
-    tx:          Option<mpsc::UnboundedSender<PlaybackEvent>>,
+    url:          &str,
+    anime_id:     &str,
+    episode:      &str,
+    resume_from:  f64,
+    tx:           Option<mpsc::UnboundedSender<PlaybackEvent>>,
+    skip_times:   Option<crate::api::allanime::SkipTimes>,
+    skip_setting: &str,
 ) -> Result<(f64, f64)> {
     let url = url.replace("https://https://", "https://")
                  .replace("http://http://", "http://");
@@ -119,19 +121,61 @@ pub fn launch_mpv_tracked(
         cmd.arg(format!("--start={resume_from:.1}"));
     }
 
+    // ── Skip intro/outro via skip.lua + --script-opts ─────────────────────────
+    // This is the correct approach used by ani-cli/ani-skip:
+    // pass timestamps as script-opts, let the Lua script do the seeking
+    // internally within mpv (IPC seek from outside is unreliable on streams).
+    if let Some(ref st) = skip_times {
+        let skip_intro = matches!(skip_setting, "intro" | "both");
+        let skip_outro = matches!(skip_setting, "outro" | "both");
+
+        crate::api::allanime::skip_log(&format!("[nexus-skip] skip_setting={skip_setting} skip_intro={skip_intro} skip_outro={skip_outro}"));
+        crate::api::allanime::skip_log(&format!("[nexus-skip] intro={:?}", st.intro.as_ref().map(|i| (i.start, i.end))));
+        crate::api::allanime::skip_log(&format!("[nexus-skip] outro={:?}", st.outro.as_ref().map(|o| (o.start, o.end))));
+
+        let lua_path = ensure_skip_lua_installed();
+        crate::api::allanime::skip_log(&format!("[nexus-skip] lua_path={:?}", lua_path));
+
+        let mut opts_parts: Vec<String> = Vec::new();
+        if skip_intro {
+            if let Some(ref i) = st.intro {
+                opts_parts.push(format!("nexus_skip-op_start={:.3}", i.start));
+                opts_parts.push(format!("nexus_skip-op_end={:.3}",   i.end));
+            }
+        }
+        if skip_outro {
+            if let Some(ref o) = st.outro {
+                opts_parts.push(format!("nexus_skip-ed_start={:.3}", o.start));
+                opts_parts.push(format!("nexus_skip-ed_end={:.3}",   o.end));
+            }
+        }
+        if !opts_parts.is_empty() {
+            let script_opts = opts_parts.join(",");
+            crate::api::allanime::skip_log("[nexus-skip] --script-opts={script_opts}");
+            if let Some(ref path) = lua_path {
+                crate::api::allanime::skip_log(&format!("[nexus-skip] --script={}", path.display()));
+                cmd.arg(format!("--script={}", path.display()));
+            }
+            cmd.arg(format!("--script-opts={script_opts}"));
+        } else {
+            crate::api::allanime::skip_log("[nexus-skip] no opts_parts built — check skip_intro/outro flags and interval data");
+        }
+    } else {
+        crate::api::allanime::skip_log(&format!("[nexus-skip] skip_times=None — skip_setting={skip_setting}, no timestamps available"));
+    }
+
     let mut child = cmd.spawn().map_err(|e| anyhow!(
         "Failed to launch mpv: {e}\nInstall: sudo apt install mpv"
     ))?;
 
     // ── observe_property stream thread ────────────────────────────────────────
-    let socket2   = socket.clone();
-    let anime_id2 = anime_id.to_string();
-    let episode2  = episode.to_string();
-    let tx2       = tx.clone();
+    let socket2      = socket.clone();
+    let anime_id2    = anime_id.to_string();
+    let episode2     = episode.to_string();
+    let tx2          = tx.clone();
     let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
 
-    // Shared last-known position/duration from the observer stream
-    let last_known = std::sync::Arc::new(std::sync::Mutex::new((0.0f64, 0.0f64)));
+    let last_known  = std::sync::Arc::new(std::sync::Mutex::new((0.0f64, 0.0f64)));
     let last_known2 = last_known.clone();
 
     let observer = std::thread::spawn(move || {
@@ -212,9 +256,108 @@ fn read_watch_later(dir: &str) -> Result<(f64, f64)> {
 /// Connects to the IPC socket, subscribes to time-pos and duration changes,
 /// and reads the event stream until the socket closes or stop is signalled.
 /// Sends Position events to the app. Checkpoints to DB every 30 seconds.
+/// Install skip.lua to the user's mpv scripts directory if not already present.
+/// The script is embedded as a string constant — no external dependency needed.
+fn ensure_skip_lua_installed() -> Option<std::path::PathBuf> {
+    const SKIP_LUA: &str = r#"
+-- nexus-skip.lua — nexus-tui aniskip integration
+local opts = {
+    op_start = -1,
+    op_end   = -1,
+    ed_start = -1,
+    ed_end   = -1,
+}
+require("mp.options").read_options(opts, "nexus_skip")
+
+local last_intro_seek = -10
+local last_outro_seek = -10
+local COOLDOWN = 3.0
+
+local function do_seek(target, label)
+    -- Pause briefly so the stream buffer settles before seeking
+    mp.set_property("pause", "yes")
+    mp.add_timeout(0.1, function()
+        mp.commandv("seek", string.format("%.3f", target), "absolute")
+        mp.set_property("pause", "no")
+        mp.osd_message("\xe2\x8f\xad " .. label, 2)
+    end)
+end
+
+mp.observe_property("time-pos", "number", function(_, pos)
+    if pos == nil then return end
+    local now = mp.get_time()
+
+    if opts.op_start >= 0 and opts.op_end > 0
+        and pos >= opts.op_start and pos <= opts.op_end
+        and (now - last_intro_seek) > COOLDOWN then
+            last_intro_seek = now
+            do_seek(opts.op_end, "Skipped intro")
+    end
+
+    if opts.ed_start >= 0 and opts.ed_end > 0
+        and pos >= opts.ed_start and pos <= opts.ed_end
+        and (now - last_outro_seek) > COOLDOWN then
+            last_outro_seek = now
+            do_seek(opts.ed_end, "Skipped outro")
+    end
+end)
+"#;
+
+    let scripts_dir = mpv_scripts_dir();
+    if let Some(dir) = scripts_dir {
+        let path = dir.join("nexus-skip.lua");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&path, SKIP_LUA);
+        return Some(path);
+    }
+    None
+}
+
+/// Get the mpv scripts directory for the current platform.
+fn mpv_scripts_dir() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        let home = std::env::var("HOME").ok()?;
+        Some(std::path::PathBuf::from(home).join(".config/mpv/scripts"))
+    }
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var("APPDATA").ok()?;
+        Some(std::path::PathBuf::from(appdata).join("mpv\\scripts"))
+    }
+    #[cfg(not(any(unix, windows)))]
+    None
+}
+
+/// Send a seek command + OSD message through a fresh IPC connection.
+/// Used as fallback only — primary skip is handled by skip.lua.
+fn ipc_send_commands(socket: &str, seek_to: f64, osd_text: &str) {
+    use std::io::Write;
+
+    let cmds = format!(
+        "{{\"command\":[\"seek\",{seek_to:.3},\"absolute\"]}}\n\
+         {{\"command\":[\"show-text\",\"{osd_text}\",2000]}}\n"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+        if let Ok(mut s) = UnixStream::connect(socket) {
+            let _ = s.write_all(cmds.as_bytes());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::fs::OpenOptions;
+        if let Ok(mut f) = OpenOptions::new().read(true).write(true).open(socket) {
+            let _ = f.write_all(cmds.as_bytes());
+        }
+    }
+}
+
 /// One-shot IPC query — returns (time-pos, duration) from mpv socket/pipe.
 fn ipc_get_position_once(socket: &str) -> Result<(f64, f64)> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufReader, Write};
 
     let subscribe = concat!(
         "{\"command\":[\"get_property\",\"time-pos\"]}\n",
@@ -355,6 +498,8 @@ fn observe_stream(
                         *lk = (cur_pos, cur_dur);
                     }
                 }
+
+                // Skip is handled by nexus-skip.lua via --script-opts
 
                 if let Some(ref t) = tx {
                     if cur_pos > 0.0 {

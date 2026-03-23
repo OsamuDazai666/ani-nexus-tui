@@ -84,11 +84,10 @@ async fn run<B: ratatui::backend::Backend>(
 
         // Run mpv on the main thread — the only way to safely do terminal teardown/restore.
         // pending_mpv is set by handle_msg(LaunchMpv) or handle_msg(StreamUrl).
-        if let Some((url, anime_id, episode, resume_from)) = app.pending_mpv.take() {
+        if let Some((url, anime_id, episode, resume_from, skip_times, skip_setting)) = app.pending_mpv.take() {
             let db  = app.db.clone();
             let tx  = app.msg_tx.clone();
 
-            // Tear down ratatui before handing terminal to mpv
             crossterm::terminal::disable_raw_mode()?;
             crossterm::execute!(
                 std::io::stdout(),
@@ -96,8 +95,6 @@ async fn run<B: ratatui::backend::Backend>(
                 crossterm::event::DisableMouseCapture,
             )?;
 
-            // Build a PlaybackEvent → AppMsg bridge so the observe stream
-            // can send live position updates back into the app message queue.
             let (pb_tx, mut pb_rx) = tokio::sync::mpsc::unbounded_channel::<player::PlaybackEvent>();
             let tx_fwd = tx.clone();
             tokio::spawn(async move {
@@ -107,7 +104,7 @@ async fn run<B: ratatui::backend::Backend>(
             });
 
             let (pos, dur) = player::launch_mpv_tracked(
-                &url, &anime_id, &episode, resume_from, Some(pb_tx),
+                &url, &anime_id, &episode, resume_from, Some(pb_tx), skip_times, &skip_setting,
             ).unwrap_or((0.0, 0.0));
 
             // Restore ratatui

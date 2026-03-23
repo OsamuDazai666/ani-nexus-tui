@@ -1,183 +1,202 @@
 #!/usr/bin/env bash
-# nexus-tui installer — Linux & macOS
-# Usage: curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.sh | bash
+# ────────────────────────────────────────────────────────────────────────────
+# nexus-tui installer — Linux / macOS
+# ────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
 
-set -e
+# ── Colors & symbols ─────────────────────────────────────────────────────────
+RED='\033[0;31m';  GREEN='\033[0;32m';  YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m';      DIM='\033[2m';  RESET='\033[0m'
+CHECK="${GREEN}✓${RESET}"; CROSS="${RED}✗${RESET}"; ARROW="${CYAN}▶${RESET}"
+DIAMOND="${YELLOW}◆${RESET}"
 
-REPO="OsamuDazai666/nexus-tui"
-BOLD="\033[1m"
-RED="\033[31m"
-GREEN="\033[32m"
-YELLOW="\033[33m"
-CYAN="\033[36m"
-DIM="\033[2m"
-RESET="\033[0m"
+INSTALL_DIR="${HOME}/.local/share/nexus-tui"
+BIN_DIR="${HOME}/.local/bin"
+REPO_URL="https://github.com/OsamuDazai666/nexus-tui.git"
 
-# ── Detect OS ─────────────────────────────────────────────────────────────────
-
-OS="$(uname -s)"
-ARCH="$(uname -m)"
-
-case "$OS" in
-  Linux*)  PLATFORM="linux" ;;
-  Darwin*) PLATFORM="macos" ;;
-  *)       echo -e "${RED}Unsupported OS: $OS${RESET}"; exit 1 ;;
-esac
-
-case "$ARCH" in
-  x86_64|amd64)  ARCH_TAG="x86_64" ;;
-  aarch64|arm64) ARCH_TAG="aarch64" ;;
-  *) echo -e "${RED}Unsupported arch: $ARCH${RESET}"; exit 1 ;;
-esac
-
-INSTALL_DIR="$HOME/.local/bin"
-mkdir -p "$INSTALL_DIR"
-
-echo ""
-echo -e "${CYAN}${BOLD}◆ nexus-tui installer${RESET}"
-echo -e "${DIM}  platform: $PLATFORM/$ARCH_TAG${RESET}"
-echo ""
-
-# ── Package manager helpers ───────────────────────────────────────────────────
-
-has() { command -v "$1" >/dev/null 2>&1; }
-
-install_pkg() {
-  local pkg="$1"
-  if [ "$PLATFORM" = "macos" ]; then
-    brew install "$pkg"
-  elif has apt-get; then
-    sudo apt-get install -y "$pkg"
-  elif has pacman; then
-    sudo pacman -S --noconfirm "$pkg"
-  elif has dnf; then
-    sudo dnf install -y "$pkg"
-  elif has zypper; then
-    sudo zypper install -y "$pkg"
-  else
-    echo -e "${YELLOW}⚠  Cannot auto-install $pkg — please install it manually${RESET}"
-    return 1
-  fi
-}
-
-# ── Build from source ─────────────────────────────────────────────────────────
-
-build_from_source() {
-  if ! has cargo; then
-    echo -e "${CYAN}Installing Rust...${RESET}"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
-  fi
-
-  if [ "$PLATFORM" = "linux" ]; then
-    has apt-get && sudo apt-get install -y build-essential pkg-config libssl-dev
-  fi
-
-  TMP=$(mktemp -d)
-  echo -e "${CYAN}Cloning nexus-tui...${RESET}"
-  git clone "https://github.com/${REPO}.git" "$TMP/nexus-tui"
-  cd "$TMP/nexus-tui"
-  echo -e "${CYAN}Compiling... (this takes about a minute)${RESET}"
-  cargo build --release
-  cp target/release/nexus "$INSTALL_DIR/nexus"
-  chmod +x "$INSTALL_DIR/nexus"
-  cd - && rm -rf "$TMP"
-  echo -e "${GREEN}✓ Built and installed to $INSTALL_DIR/nexus${RESET}"
-}
-
-# ── Homebrew (macOS) ──────────────────────────────────────────────────────────
-
-if [ "$PLATFORM" = "macos" ] && ! has brew; then
-  echo -e "${CYAN}Installing Homebrew...${RESET}"
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-fi
-
-# ── Kitty terminal ────────────────────────────────────────────────────────────
-
-install_kitty() {
-  echo -e "${CYAN}Installing Kitty terminal...${RESET}"
-  if [ "$PLATFORM" = "macos" ]; then
-    brew install --cask kitty
-  else
-    curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
-    ln -sf "$HOME/.local/kitty.app/bin/kitty" "$INSTALL_DIR/kitty" 2>/dev/null || true
-    ln -sf "$HOME/.local/kitty.app/bin/kitten" "$INSTALL_DIR/kitten" 2>/dev/null || true
-    cp "$HOME/.local/kitty.app/share/applications/kitty.desktop" \
-       "$HOME/.local/share/applications/" 2>/dev/null || true
-    sed -i "s|Icon=kitty|Icon=$HOME/.local/kitty.app/share/icons/hicolor/256x256/apps/kitty.png|g" \
-       "$HOME/.local/share/applications/kitty.desktop" 2>/dev/null || true
-  fi
-  echo -e "${GREEN}✓ Kitty installed${RESET}"
-}
-
-if has kitty; then
-  echo -e "${GREEN}✓ Kitty $(kitty --version | head -1)${RESET}"
-else
-  echo -e "${YELLOW}Kitty not found (recommended for best image quality)${RESET}"
-  read -rp "  Install Kitty? [Y/n] " ans
-  case "$ans" in [Nn]*) ;; *) install_kitty ;; esac
-fi
-
-# ── mpv ───────────────────────────────────────────────────────────────────────
-
-if has mpv; then
-  echo -e "${GREEN}✓ mpv $(mpv --version | head -1 | cut -d' ' -f1-2)${RESET}"
-else
-  echo -e "${CYAN}Installing mpv...${RESET}"
-  install_pkg mpv
-fi
-
-# ── yt-dlp ────────────────────────────────────────────────────────────────────
-
-if has yt-dlp; then
-  echo -e "${GREEN}✓ yt-dlp $(yt-dlp --version)${RESET}"
-else
-  echo -e "${CYAN}Installing yt-dlp...${RESET}"
-  if [ "$PLATFORM" = "macos" ]; then
-    brew install yt-dlp
-  else
-    sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-      -o /usr/local/bin/yt-dlp
-    sudo chmod +x /usr/local/bin/yt-dlp
-  fi
-fi
-
-# ── TMDB API key ──────────────────────────────────────────────────────────────
-
-if [ -z "$TMDB_API_KEY" ]; then
+# ── Helpers ───────────────────────────────────────────────────────────────────
+header() {
   echo ""
-  echo -e "${YELLOW}TMDB API key not set (needed for Movies & TV)${RESET}"
-  echo -e "${DIM}  Get a free key at: https://www.themoviedb.org/settings/api${RESET}"
-  read -rp "  Enter TMDB API key (Enter to skip): " KEY
-  if [ -n "$KEY" ]; then
-    export TMDB_API_KEY="$KEY"
-    SHELL_RC=""
-    [ -f "$HOME/.zshrc" ]   && SHELL_RC="$HOME/.zshrc"
-    [ -f "$HOME/.bashrc" ]  && SHELL_RC="$HOME/.bashrc"
-    [ -f "$HOME/.profile" ] && [ -z "$SHELL_RC" ] && SHELL_RC="$HOME/.profile"
-    if [ -n "$SHELL_RC" ]; then
-      grep -v "TMDB_API_KEY" "$SHELL_RC" > "${SHELL_RC}.tmp" && mv "${SHELL_RC}.tmp" "$SHELL_RC"
-      echo "export TMDB_API_KEY=\"$KEY\"" >> "$SHELL_RC"
-      echo -e "${GREEN}✓ Saved to $SHELL_RC${RESET}"
-    fi
+  echo -e "  ${DIAMOND} ${BOLD}NEXUS-TUI INSTALLER${RESET}"
+  echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo ""
+}
+
+step() { echo -e "  ${ARROW} ${BOLD}$1${RESET}"; }
+ok()   { echo -e "    ${CHECK} $1"; }
+fail() { echo -e "    ${CROSS} $1"; exit 1; }
+info() { echo -e "    ${DIM}$1${RESET}"; }
+warn() { echo -e "    ${YELLOW}⚠${RESET}  $1"; }
+
+ask() {
+  echo -en "  ${CYAN}?${RESET} $1 ${DIM}[Y/n]${RESET} "
+  read -r ans
+  [[ -z "$ans" || "$ans" =~ ^[Yy] ]]
+}
+
+spinner() {
+  local pid=$1 msg=$2
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    printf "\r    ${CYAN}%s${RESET}  %s" "${frames[$((i % 10))]}" "$msg"
+    sleep 0.1
+    ((i++))
+  done
+  printf "\r"
+}
+
+check_cmd() {
+  if command -v "$1" &>/dev/null; then
+    ok "$1 $(${2:-$1 --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1})"
+    return 0
+  fi
+  return 1
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+clear
+header
+
+# ── Detect existing install ───────────────────────────────────────────────────
+if [[ -d "$INSTALL_DIR/.git" ]]; then
+  echo -e "  ${YELLOW}Existing install found at ${INSTALL_DIR}${RESET}"
+  echo ""
+
+  step "Checking for updates"
+  cd "$INSTALL_DIR"
+  git fetch origin --quiet 2>/dev/null || true
+  LOCAL=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+  REMOTE=$(git rev-parse origin/main 2>/dev/null || echo "unknown")
+
+  if [[ "$LOCAL" == "$REMOTE" ]]; then
+    ok "Already up to date"
+    echo ""
+    info "Binary: ${BIN_DIR}/nexus"
+    echo ""
+    echo -e "  ${DIAMOND} Nothing to do. Run ${BOLD}nexus${RESET} to launch."
+    echo ""
+    exit 0
+  fi
+
+  echo ""
+  COMMITS=$(git log --oneline "${LOCAL}..${REMOTE}" 2>/dev/null | wc -l | tr -d ' ')
+  info "${COMMITS} new commit(s) available"
+  echo ""
+  if ! ask "Update nexus-tui?"; then
+    echo -e "\n  ${DIM}Skipped. Run ${BOLD}nexus${RESET} to launch.${RESET}\n"
+    exit 0
+  fi
+
+  step "Pulling latest"
+  git pull origin main --quiet &
+  spinner $! "Pulling changes…"
+  ok "Updated to $(git rev-parse --short HEAD)"
+  SKIP_CLONE=true
+else
+  SKIP_CLONE=false
+  echo -e "  ${DIM}Install directory: ${INSTALL_DIR}${RESET}"
+  echo ""
+  if ! ask "Install nexus-tui?"; then
+    echo -e "\n  ${DIM}Cancelled.${RESET}\n"; exit 0
   fi
 fi
 
-# ── Build & install nexus ─────────────────────────────────────────────────────
+echo ""
+
+# ── Check dependencies ────────────────────────────────────────────────────────
+step "Checking dependencies"
+
+HAS_GIT=false; HAS_RUST=false; HAS_MPV=false; HAS_CURL=false
+
+check_cmd git  && HAS_GIT=true  || true
+check_cmd curl && HAS_CURL=true || true
+check_cmd mpv  && HAS_MPV=true  || warn "mpv not found — install it to play anime"
+
+if command -v rustc &>/dev/null; then
+  RUSTV=$(rustc --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  ok "rust ${RUSTV}"
+  HAS_RUST=true
+fi
+
+if [[ "$HAS_GIT" == false ]]; then
+  fail "git is required. Install it and re-run this script."
+fi
+
+# ── Install Rust if missing ───────────────────────────────────────────────────
+if [[ "$HAS_RUST" == false ]]; then
+  echo ""
+  step "Installing Rust via rustup"
+  if [[ "$HAS_CURL" == false ]]; then
+    fail "curl is required to install Rust. Please install curl first."
+  fi
+  if ask "Install Rust (rustup)?"; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet &
+    spinner $! "Installing Rust…"
+    source "${HOME}/.cargo/env" 2>/dev/null || true
+    ok "Rust installed"
+    HAS_RUST=true
+  else
+    fail "Rust is required to build nexus-tui."
+  fi
+fi
 
 echo ""
-echo -e "${CYAN}Building nexus-tui from source...${RESET}"
-build_from_source
+
+# ── Clone repo ────────────────────────────────────────────────────────────────
+if [[ "$SKIP_CLONE" == false ]]; then
+  step "Cloning repository"
+  mkdir -p "$(dirname "$INSTALL_DIR")"
+  if [[ -d "$INSTALL_DIR" ]]; then
+    rm -rf "$INSTALL_DIR"
+  fi
+  git clone --quiet "$REPO_URL" "$INSTALL_DIR" &
+  spinner $! "Cloning nexus-tui…"
+  ok "Cloned to ${INSTALL_DIR}"
+  echo ""
+fi
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+step "Building nexus-tui"
+info "This takes 1–3 minutes on first build"
+echo ""
+
+cd "$INSTALL_DIR"
+START_TS=$(date +%s)
+
+CARGO_INCREMENTAL=0 cargo build --release --quiet 2>&1 &
+BUILD_PID=$!
+spinner $BUILD_PID "Compiling…"
+wait $BUILD_PID
+BUILD_EXIT=$?
+
+END_TS=$(date +%s)
+ELAPSED=$((END_TS - START_TS))
+
+if [[ $BUILD_EXIT -ne 0 ]]; then
+  fail "Build failed. Run 'cargo build --release' in ${INSTALL_DIR} to see errors."
+fi
+ok "Built in ${ELAPSED}s"
+echo ""
+
+# ── Install binary ────────────────────────────────────────────────────────────
+step "Installing binary"
+mkdir -p "$BIN_DIR"
+cp "${INSTALL_DIR}/target/release/nexus" "${BIN_DIR}/nexus"
+chmod +x "${BIN_DIR}/nexus"
+ok "Installed to ${BIN_DIR}/nexus"
 
 # ── PATH check ────────────────────────────────────────────────────────────────
-
-if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
+if [[ ":$PATH:" != *":${BIN_DIR}:"* ]]; then
   echo ""
-  echo -e "${YELLOW}Add this to your shell profile to use 'nexus' from anywhere:${RESET}"
-  echo -e "  ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}"
+  warn "${BIN_DIR} is not in your PATH"
+  info "Add this to your shell config (~/.bashrc, ~/.zshrc, etc.):"
+  echo ""
+  echo -e "    ${DIM}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}"
 fi
 
+# ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}${BOLD}Done! Run nexus in your terminal.${RESET}"
-echo -e "${DIM}  Tip: run inside Kitty for best image quality${RESET}"
+echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+echo -e "  ${DIAMOND} ${BOLD}Done!${RESET}  Run ${CYAN}${BOLD}nexus${RESET} to launch"
 echo ""
