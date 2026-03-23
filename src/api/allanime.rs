@@ -13,6 +13,7 @@ const AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/2
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllAnimeItem {
     pub id: String,            // AllAnime _id — used directly for episodes + streaming
+    pub mal_id: Option<u32>,   // MyAnimeList ID — used for AniSkip
     pub name: String,          // romaji/primary name
     pub english_name: Option<String>,
     pub thumbnail: Option<String>,
@@ -95,6 +96,7 @@ impl From<RawShow> for AllAnimeItem {
         let eps = r.available_episodes.unwrap_or(RawEpisodes { sub: None, dub: None });
         AllAnimeItem {
             id: r.id,
+            mal_id: None,  // resolved later via AniList
             name: r.name.unwrap_or_default(),
             english_name: r.english_name,
             thumbnail: r.thumbnail,
@@ -206,4 +208,143 @@ fn strip_html(s: &str) -> String {
         .replace("&apos;", "'")
         .replace("&#x2014;", "—")
         .replace("<br>", "\n")
+}
+// ── MAL ID resolver via AniList ───────────────────────────────────────────────
+
+/// Resolve a MyAnimeList ID for an anime title via AniList's GraphQL API.
+/// Returns None if not found — skip feature degrades gracefully.
+pub async fn resolve_mal_id(title: &str) -> Option<u32> {
+    // Use Jikan (unofficial MAL API) — no auth needed, reliable
+    let client = reqwest::Client::builder()
+        .user_agent(AGENT)
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .ok()?;
+
+    let url = format!(
+        "https://api.jikan.moe/v4/anime?q={}&limit=1&sfw=false",
+        urlencoding::encode(title)
+    );
+    skip_log(&format!("Jikan search: {url}"));
+
+    let resp = client.get(&url).send().await;
+    match resp {
+        Err(e) => { skip_log(&format!("Jikan error: {e}")); return None; }
+        Ok(r) => {
+            skip_log(&format!("Jikan status: {}", r.status()));
+            let json: serde_json::Value = r.json().await.ok()?;
+            let id = json["data"][0]["mal_id"].as_u64().map(|id| id as u32);
+            skip_log(&format!("Jikan MAL ID: {id:?}"));
+            id
+        }
+    }
+}
+
+// ── AniSkip fetch ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct SkipInterval {
+    pub start: f64,
+    pub end:   f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SkipTimes {
+    pub intro: Option<SkipInterval>,
+    pub outro: Option<SkipInterval>,
+}
+
+/// Fetch skip timestamps from AniSkip for a given MAL ID + episode.
+pub async fn fetch_skip_times(mal_id: u32, episode: u32) -> Option<SkipTimes> {
+    // episodeLength=0 tells AniSkip to return results for any episode length
+    let url = format!(
+        "https://api.aniskip.com/v2/skip-times/{mal_id}/{episode}?types[]=op&types[]=ed&types[]=mixed-op&types[]=mixed-ed&episodeLength=0"
+    );
+    skip_log(&format!("[nexus-skip] AniSkip URL: {url}"));
+
+    let client = reqwest::Client::builder()
+        .user_agent(AGENT)
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .ok()?;
+
+    let resp = client.get(&url).send().await;
+    match &resp {
+        Err(e) => { skip_log(&format!("[nexus-skip] AniSkip request error: {e}")); return None; }
+        Ok(r)  => skip_log(&format!("[nexus-skip] AniSkip status: {}", r.status())),
+    }
+    let resp = resp.ok()?;
+    if !resp.status().is_success() {
+        skip_log("[nexus-skip] AniSkip non-success status");
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    skip_log(&format!("[nexus-skip] AniSkip found={} raw={}",
+        json["found"].as_bool().unwrap_or(false),
+        &json.to_string()[..300.min(json.to_string().len())]));
+    if !json["found"].as_bool().unwrap_or(false) { return None; }
+
+    let results = json["results"].as_array()?;
+
+    let mut times = SkipTimes::default();
+    for result in results {
+        let skip_type = result["skipType"].as_str().unwrap_or("");
+        // Use if-let to skip malformed entries without aborting the whole fetch
+        if let (Some(start), Some(end)) = (
+            result["interval"]["startTime"].as_f64(),
+            result["interval"]["endTime"].as_f64(),
+        ) {
+            let interval = SkipInterval { start, end };
+            match skip_type {
+                "op" | "mixed-op" => times.intro = Some(interval),
+                "ed" | "mixed-ed" => times.outro = Some(interval),
+                _ => {}
+            }
+        }
+    }
+
+    if times.intro.is_none() && times.outro.is_none() {
+        return None;
+    }
+
+    Some(times)
+}
+
+
+// ── Skip debug log ────────────────────────────────────────────────────────────
+
+/// Write skip debug messages to ~/.local/share/nexus-tui/skip.log
+/// Never writes to stderr — won't leak into the TUI.
+pub fn skip_log(msg: &str) {
+    use std::io::Write;
+    let path = dirs_log();
+    if let Some(p) = path {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = writeln!(f, "[{ts}] {msg}");
+        }
+    }
+}
+
+fn dirs_log() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        let home = std::env::var("HOME").ok()?;
+        let dir  = std::path::PathBuf::from(home).join(".local/share/nexus-tui");
+        let _    = std::fs::create_dir_all(&dir);
+        Some(dir.join("skip.log"))
+    }
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var("APPDATA").ok()?;
+        let dir     = std::path::PathBuf::from(appdata).join("nexus-tui");
+        let _       = std::fs::create_dir_all(&dir);
+        Some(dir.join("skip.log"))
+    }
+    #[cfg(not(any(unix, windows)))]
+    None
 }

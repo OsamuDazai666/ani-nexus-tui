@@ -1,186 +1,259 @@
-# nexus-tui installer for Windows
-# Usage (run in PowerShell as Administrator):
-#   irm https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.ps1 | iex
-
+# ─────────────────────────────────────────────────────────────────────────────
+# nexus-tui installer — Windows (PowerShell)
+# Run with: powershell -ExecutionPolicy Bypass -File install.ps1
+# ─────────────────────────────────────────────────────────────────────────────
 $ErrorActionPreference = "Stop"
-$REPO = "OsamuDazai666/nexus-tui"
-$INSTALL_DIR = "$env:LOCALAPPDATA\nexus-tui"
+$ProgressPreference    = "SilentlyContinue"  # speeds up Invoke-WebRequest
 
-function Write-Step  { Write-Host "  >> $args" -ForegroundColor Cyan }
-function Write-Ok    { Write-Host "  OK $args" -ForegroundColor Green }
-function Write-Warn  { Write-Host "  !! $args" -ForegroundColor Yellow }
+$INSTALL_DIR = Join-Path $env:APPDATA "nexus-tui"
+$BIN_DIR     = Join-Path $env:LOCALAPPDATA "Programs\nexus-tui"
+$REPO_URL    = "https://github.com/OsamuDazai666/nexus-tui.git"
+$EXE         = Join-Path $INSTALL_DIR "target\release\nexus.exe"
+$BIN_EXE     = Join-Path $BIN_DIR "nexus.exe"
 
-# -- Refresh PATH from environment (replaces refreshenv) ----------------------
-
-function Update-SessionPath {
-    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
-                [System.Environment]::GetEnvironmentVariable("PATH", "User")
-}
-
-# -- Build from source --------------------------------------------------------
-
-function Build-FromSource {
-    # -- Git ------------------------------------------------------------------
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        if (-not $HAS_WINGET) {
-            Write-Warn "winget not found -- please install Git manually from https://git-scm.com then re-run this script"
-            exit 1
-        }
-        Write-Step "Installing Git..."
-        winget install --id Git.Git -e --silent
-        Update-SessionPath
-    }
-
-    # -- Rust (GNU toolchain -- no Visual Studio needed) ----------------------
-    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        if (-not $HAS_WINGET) {
-            Write-Warn "winget not found -- please install Rust manually from https://rustup.rs then re-run this script"
-            exit 1
-        }
-        Write-Step "Installing Rust..."
-        winget install --id Rustlang.Rustup -e --silent
-        Update-SessionPath
-    }
-
-    # Switch to GNU toolchain to avoid needing Visual Studio / MSVC linker
-    Write-Step "Configuring Rust GNU toolchain (avoids ~3GB Visual Studio install)..."
-    rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update | Out-Null
-    rustup default stable-x86_64-pc-windows-gnu | Out-Null
-
-    # -- mingw64 (provides the GNU linker) ------------------------------------
-    if (-not (Get-Command x86_64-w64-mingw32-gcc -ErrorAction SilentlyContinue)) {
-        Write-Step "Installing mingw-w64 (GNU linker for Rust)..."
-        if ($HAS_SCOOP) {
-            scoop install mingw
-        } elseif ($HAS_WINGET) {
-            winget install --id MSYS2.MSYS2 -e --silent
-            $mingwBin = "C:\msys64\mingw64\bin"
-            if (Test-Path $mingwBin) {
-                $env:PATH += ";$mingwBin"
-                $current = [System.Environment]::GetEnvironmentVariable("PATH", "User")
-                [System.Environment]::SetEnvironmentVariable("PATH", "$current;$mingwBin", "User")
-            }
-        } else {
-            Write-Warn "Could not install mingw-w64 automatically."
-            Write-Host "    Please install Scoop first: https://scoop.sh" -ForegroundColor DarkGray
-            exit 1
-        }
-        Update-SessionPath
-    }
-
-    # -- Clone & build --------------------------------------------------------
-    $TMP = "$env:TEMP\nexus-build"
-
-    # Make sure we are NOT inside the temp dir before touching it
-    Set-Location $env:USERPROFILE
-
-    if (Test-Path $TMP) { Remove-Item $TMP -Recurse -Force }
-
-    Write-Step "Cloning nexus-tui..."
-    git clone "https://github.com/$REPO.git" $TMP
-
-    Push-Location $TMP
-    Write-Step "Compiling... (this takes about a minute)"
-    cargo build --release
-    Pop-Location
-
-    # Back to home before cleanup so the dir is never in use
-    Set-Location $env:USERPROFILE
-
-    if (-not (Test-Path "$TMP\target\release\nexus.exe")) {
-        Write-Warn "Build failed -- nexus.exe was not produced."
-        exit 1
-    }
-
-    New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
-
-    # Kill any running nexus process so the exe is not locked during copy
-    Get-Process -Name "nexus" -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Milliseconds 500
-
-    Copy-Item "$TMP\target\release\nexus.exe" "$INSTALL_DIR\nexus.exe"
-    Remove-Item $TMP -Recurse -Force
-    Write-Ok "Built and installed to $INSTALL_DIR\nexus.exe"
-}
-
-Write-Host ""
-Write-Host "  nexus-tui installer" -ForegroundColor Yellow -BackgroundColor Black
-Write-Host ""
-
-# -- Winget / Scoop check -----------------------------------------------------
-
-$HAS_WINGET = [bool](Get-Command winget -ErrorAction SilentlyContinue)
-$HAS_SCOOP  = [bool](Get-Command scoop  -ErrorAction SilentlyContinue)
-
-if (-not $HAS_SCOOP) {
-    Write-Step "Installing Scoop package manager..."
-    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-    Invoke-RestMethod get.scoop.sh | Invoke-Expression
-    $env:PATH += ";$env:USERPROFILE\scoop\shims"
-    $HAS_SCOOP = $true
-    Write-Ok "Scoop installed"
-}
-
-# -- mpv ----------------------------------------------------------------------
-
-if (-not (Get-Command mpv -ErrorAction SilentlyContinue)) {
-    Write-Step "Installing mpv..."
-    $mpvInstalled = $false
-    if ($HAS_WINGET) {
-        winget install --id mpv.mpv -e --silent
-        Update-SessionPath
-        $mpvInstalled = [bool](Get-Command mpv -ErrorAction SilentlyContinue)
-    }
-    if (-not $mpvInstalled) {
-        scoop install mpv
-    }
-    Write-Ok "mpv installed"
-} else {
-    Write-Ok "mpv already installed"
-}
-
-# -- yt-dlp -------------------------------------------------------------------
-
-if (-not (Get-Command yt-dlp -ErrorAction SilentlyContinue)) {
-    Write-Step "Installing yt-dlp..."
-    scoop install yt-dlp
-    Write-Ok "yt-dlp installed"
-} else {
-    Write-Ok "yt-dlp already installed"
-}
-
-# -- TMDB API Key -------------------------------------------------------------
-
-$CURRENT_KEY = [System.Environment]::GetEnvironmentVariable("TMDB_API_KEY", "User")
-if (-not $CURRENT_KEY) {
+# ── Colours ───────────────────────────────────────────────────────────────────
+function Write-Header {
+    Clear-Host
     Write-Host ""
-    Write-Warn "TMDB API key not set (needed for Movies & TV)"
-    Write-Host "    Get a free key: https://www.themoviedb.org/settings/api" -ForegroundColor DarkGray
-    $KEY = Read-Host "    Enter TMDB API key (Enter to skip)"
-    if ($KEY) {
-        [System.Environment]::SetEnvironmentVariable("TMDB_API_KEY", $KEY, "User")
-        $env:TMDB_API_KEY = $KEY
-        Write-Ok "TMDB key saved to user environment"
+    Write-Host "  " -NoNewline
+    Write-Host "◆ " -ForegroundColor Yellow -NoNewline
+    Write-Host "NEXUS-TUI INSTALLER" -ForegroundColor White
+    Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+function Write-Step($msg) {
+    Write-Host "  " -NoNewline
+    Write-Host "▶ " -ForegroundColor Cyan -NoNewline
+    Write-Host $msg -ForegroundColor White
+}
+
+function Write-OK($msg) {
+    Write-Host "    " -NoNewline
+    Write-Host "✓ " -ForegroundColor Green -NoNewline
+    Write-Host $msg -ForegroundColor Gray
+}
+
+function Write-Fail($msg) {
+    Write-Host "    " -NoNewline
+    Write-Host "✗ " -ForegroundColor Red -NoNewline
+    Write-Host $msg -ForegroundColor Red
+    exit 1
+}
+
+function Write-Info($msg)  { Write-Host "    $msg" -ForegroundColor DarkGray }
+function Write-Warn($msg)  {
+    Write-Host "    " -NoNewline
+    Write-Host "⚠  " -ForegroundColor Yellow -NoNewline
+    Write-Host $msg -ForegroundColor Yellow
+}
+
+function Ask-YesNo($msg) {
+    Write-Host "  " -NoNewline
+    Write-Host "? " -ForegroundColor Cyan -NoNewline
+    Write-Host "$msg " -ForegroundColor White -NoNewline
+    Write-Host "[Y/n] " -ForegroundColor DarkGray -NoNewline
+    $ans = Read-Host
+    return ($ans -eq "" -or $ans -match "^[Yy]")
+}
+
+function Start-Spinner($msg) {
+    $script:SpinMsg  = $msg
+    $script:SpinStop = $false
+    $frames = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
+    $script:SpinJob = Start-Job -ScriptBlock {
+        param($frames, $msg, $pipe)
+        $i = 0
+        while (-not $using:SpinStop) {
+            $f = $frames[$i % $frames.Count]
+            Write-Host "`r    $f  $msg" -NoNewline
+            Start-Sleep -Milliseconds 100
+            $i++
+        }
+    } -ArgumentList $frames, $msg, $null
+}
+
+function Stop-Spinner {
+    $script:SpinStop = $true
+    Start-Sleep -Milliseconds 200
+    if ($script:SpinJob) { Remove-Job $script:SpinJob -Force -ErrorAction SilentlyContinue }
+    Write-Host "`r" -NoNewline
+    Write-Host "                                        `r" -NoNewline
+}
+
+function Check-Command($cmd) {
+    return $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue)
+}
+
+function Get-Version($cmd) {
+    try { return (& $cmd --version 2>&1) -replace ".*?(\d+\.\d+[\.\d]*).*",'$1' | Select-Object -First 1 }
+    catch { return "?" }
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+Write-Header
+
+# ── Detect existing install ───────────────────────────────────────────────────
+$skipClone = $false
+if (Test-Path (Join-Path $INSTALL_DIR ".git")) {
+    Write-Host "  " -NoNewline
+    Write-Host "Existing install found at $INSTALL_DIR" -ForegroundColor Yellow
+    Write-Host ""
+
+    Write-Step "Checking for updates"
+    Set-Location $INSTALL_DIR
+    git fetch origin --quiet 2>$null | Out-Null
+    $local  = git rev-parse HEAD 2>$null
+    $remote = git rev-parse origin/main 2>$null
+
+    if ($local -eq $remote) {
+        Write-OK "Already up to date"
+        Write-Host ""
+        Write-Info "Binary: $BIN_EXE"
+        Write-Host ""
+        Write-Host "  ◆ Nothing to do. Run " -ForegroundColor Gray -NoNewline
+        Write-Host "nexus" -ForegroundColor Cyan -NoNewline
+        Write-Host " to launch." -ForegroundColor Gray
+        Write-Host ""
+        exit 0
+    }
+
+    $commits = (git log --oneline "${local}..${remote}" 2>$null | Measure-Object -Line).Lines
+    Write-Info "$commits new commit(s) available"
+    Write-Host ""
+
+    if (Ask-YesNo "Update nexus-tui?") {
+        Write-Step "Pulling latest"
+        git pull origin main --quiet 2>$null | Out-Null
+        Write-OK "Updated"
+        $skipClone = $true
+    } else {
+        Write-Host ""
+        Write-Host "  Skipped. Run " -ForegroundColor DarkGray -NoNewline
+        Write-Host "nexus" -ForegroundColor Cyan -NoNewline
+        Write-Host " to launch." -ForegroundColor DarkGray
+        Write-Host ""; exit 0
+    }
+} else {
+    Write-Info "Install directory: $INSTALL_DIR"
+    Write-Host ""
+    if (-not (Ask-YesNo "Install nexus-tui?")) {
+        Write-Host ""; Write-Host "  Cancelled." -ForegroundColor DarkGray; Write-Host ""; exit 0
     }
 }
 
-# -- Build & install nexus ----------------------------------------------------
-
 Write-Host ""
-Write-Step "Building nexus-tui from source..."
-Build-FromSource
 
-# -- Add to PATH --------------------------------------------------------------
+# ── Check dependencies ────────────────────────────────────────────────────────
+Write-Step "Checking dependencies"
 
-$CURRENT_PATH = [System.Environment]::GetEnvironmentVariable("PATH", "User")
-if ($CURRENT_PATH -notlike "*$INSTALL_DIR*") {
-    [System.Environment]::SetEnvironmentVariable(
-        "PATH", "$CURRENT_PATH;$INSTALL_DIR", "User"
-    )
-    $env:PATH += ";$INSTALL_DIR"
-    Write-Ok "Added $INSTALL_DIR to PATH"
+$hasGit  = Check-Command "git"
+$hasRust = Check-Command "rustc"
+$hasMpv  = Check-Command "mpv"
+$hasWinget = Check-Command "winget"
+
+if ($hasGit)  { Write-OK "git $(Get-Version git)" }
+else          { Write-Fail "git is required. Install from https://git-scm.com" }
+
+if ($hasRust) { Write-OK "rust $(Get-Version rustc)" }
+if ($hasMpv)  { Write-OK "mpv $(Get-Version mpv)" }
+else          { Write-Warn "mpv not found — install it to play anime (winget install mpv)" }
+
+# ── Install Rust if missing ───────────────────────────────────────────────────
+if (-not $hasRust) {
+    Write-Host ""
+    Write-Step "Installing Rust"
+    if (Ask-YesNo "Install Rust via rustup-init.exe?") {
+        $rustupUrl = "https://win.rustup.rs/x86_64"
+        $rustupExe = Join-Path $env:TEMP "rustup-init.exe"
+        Write-Info "Downloading rustup…"
+        Invoke-WebRequest -Uri $rustupUrl -OutFile $rustupExe
+        Write-Info "Running installer (quiet mode)…"
+        & $rustupExe -y --quiet
+        # Reload PATH
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("PATH","User")
+        if (Check-Command "rustc") { Write-OK "Rust installed" }
+        else { Write-Fail "Rust install failed. Please install manually from https://rustup.rs" }
+    } else {
+        Write-Fail "Rust is required to build nexus-tui."
+    }
 }
 
 Write-Host ""
-Write-Host "  Done! Type 'nexus' in your terminal to launch." -ForegroundColor Yellow
+
+# ── Clone repo ────────────────────────────────────────────────────────────────
+if (-not $skipClone) {
+    Write-Step "Cloning repository"
+    if (Test-Path $INSTALL_DIR) { Remove-Item $INSTALL_DIR -Recurse -Force }
+    New-Item -ItemType Directory -Path (Split-Path $INSTALL_DIR) -Force | Out-Null
+    $job = Start-Job { git clone --quiet $using:REPO_URL $using:INSTALL_DIR }
+    $i = 0; $frames = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
+    while ($job.State -eq "Running") {
+        Write-Host "`r    $($frames[$i % 10])  Cloning nexus-tui…" -NoNewline
+        Start-Sleep -Milliseconds 100; $i++
+    }
+    Write-Host "`r                                      `r" -NoNewline
+    Receive-Job $job | Out-Null; Remove-Job $job
+    Write-OK "Cloned to $INSTALL_DIR"
+    Write-Host ""
+}
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+Write-Step "Building nexus-tui"
+Write-Info "This takes 1–3 minutes on first build"
+Write-Host ""
+
+Set-Location $INSTALL_DIR
+$start = Get-Date
+
+$env:CARGO_INCREMENTAL = "0"
+$job = Start-Job { Set-Location $using:INSTALL_DIR; cargo build --release --quiet 2>&1 }
+
+$i = 0; $frames = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
+while ($job.State -eq "Running") {
+    Write-Host "`r    $($frames[$i % 10])  Compiling…" -NoNewline
+    Start-Sleep -Milliseconds 100; $i++
+}
+Write-Host "`r                              `r" -NoNewline
+
+$output = Receive-Job $job
+Remove-Job $job
+
+if (-not (Test-Path $EXE)) {
+    Write-Fail "Build failed.`n$output"
+}
+
+$elapsed = [int]((Get-Date) - $start).TotalSeconds
+Write-OK "Built in ${elapsed}s"
+Write-Host ""
+
+# ── Install binary ────────────────────────────────────────────────────────────
+Write-Step "Installing binary"
+New-Item -ItemType Directory -Path $BIN_DIR -Force | Out-Null
+Copy-Item $EXE $BIN_EXE -Force
+Write-OK "Installed to $BIN_EXE"
+
+# ── PATH check ────────────────────────────────────────────────────────────────
+$userPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
+if ($userPath -notlike "*$BIN_DIR*") {
+    Write-Host ""
+    Write-Warn "$BIN_DIR is not in your PATH"
+    if (Ask-YesNo "Add it to your user PATH automatically?") {
+        [System.Environment]::SetEnvironmentVariable("PATH", "$userPath;$BIN_DIR", "User")
+        $env:PATH += ";$BIN_DIR"
+        Write-OK "PATH updated (restart your terminal for it to take effect)"
+    } else {
+        Write-Info "Add this to your PATH manually: $BIN_DIR"
+    }
+}
+
+# ── Done ──────────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor DarkGray
+Write-Host "  " -NoNewline
+Write-Host "◆ " -ForegroundColor Yellow -NoNewline
+Write-Host "Done!  Run " -ForegroundColor White -NoNewline
+Write-Host "nexus" -ForegroundColor Cyan -NoNewline
+Write-Host " to launch" -ForegroundColor White
 Write-Host ""
