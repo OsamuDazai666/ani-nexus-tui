@@ -27,21 +27,23 @@ impl Default for Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerConfig {
-    pub mpv_path:       String,
-    pub extra_args:     Vec<String>,
-    pub stream_mode:    String,
-    pub quality:        String,
-    pub skip_segments:  String,  // "none" | "intro" | "outro" | "both"
+    pub mpv_path:           String,
+    pub extra_args:         Vec<String>,
+    pub stream_mode:        String,
+    pub quality:            String,
+    pub skip_segments:      String,
+    pub resume_offset_secs: u32,   // 0–60, default 5
 }
 
 impl Default for PlayerConfig {
     fn default() -> Self {
         Self {
-            mpv_path:      "mpv".to_string(),
-            extra_args:    vec!["--no-terminal".to_string()],
-            stream_mode:   "sub".to_string(),
-            quality:       "best".to_string(),
-            skip_segments: "none".to_string(),
+            mpv_path:           "mpv".to_string(),
+            extra_args:         vec!["--no-terminal".to_string()],
+            stream_mode:        "sub".to_string(),
+            quality:            "best".to_string(),
+            skip_segments:      "none".to_string(),
+            resume_offset_secs: 5,
         }
     }
 }

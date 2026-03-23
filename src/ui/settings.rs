@@ -457,12 +457,35 @@ fn draw_playback(f: &mut Frame, app: &App, area: Rect, edit: bool, accent: Color
         toggle_line(&cfg.quality, &["best","1080","720","480"], accent, sel(1)), sel(1), accent);
     y = draw_row(f, area, y, "Skip segments",
         toggle_line(&cfg.skip_segments, &["none","intro","outro","both"], accent, sel(2)), sel(2), accent);
+
+    // Resume offset — numeric stepper with ← / → arrows
+    let offset_val = if cfg.resume_offset_secs == 0 {
+        "off".to_string()
+    } else {
+        format!("{}s", cfg.resume_offset_secs)
+    };
+    let offset_line = {
+        let s = sel(3);
+        let col = if s { accent } else { Color::Rgb(80, 80, 80) };
+        Line::from(vec![
+            Span::styled("← ", Style::default().fg(col)),
+            Span::styled(
+                format!("{:>3}", offset_val),
+                Style::default().fg(if s { Color::White } else { Color::Rgb(160,160,160) })
+                    .add_modifier(if s { ratatui::style::Modifier::BOLD } else { ratatui::style::Modifier::empty() }),
+            ),
+            Span::styled(" →  ", Style::default().fg(col)),
+            Span::styled("max 60s", Style::default().fg(Color::Rgb(50,50,50))),
+        ])
+    };
+    y = draw_row(f, area, y, "Resume offset", offset_line, sel(3), accent);
+
     y = draw_row(f, area, y, "MPV path",
-        text_line(&cfg.mpv_path, app.settings_editing && sel(3), &app.settings_input, accent),
-        sel(3), accent);
-    draw_row(f, area, y, "Extra MPV args",
-        text_line(&cfg.extra_args.join(" "), app.settings_editing && sel(4), &app.settings_input, accent),
+        text_line(&cfg.mpv_path, app.settings_editing && sel(4), &app.settings_input, accent),
         sel(4), accent);
+    draw_row(f, area, y, "Extra MPV args",
+        text_line(&cfg.extra_args.join(" "), app.settings_editing && sel(5), &app.settings_input, accent),
+        sel(5), accent);
 }
 
 fn draw_theme(f: &mut Frame, app: &App, area: Rect, edit: bool, accent: Color) {

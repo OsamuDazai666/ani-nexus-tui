@@ -1230,10 +1230,11 @@ impl App {
 
                 // Get resume position from DB
                 let ep_record = self.db.get_episode(&entry.id, &ep_str).ok().flatten();
-                let resume_from = ep_record.as_ref()
+                let raw_pos = ep_record.as_ref()
                     .filter(|r| !r.fully_watched && r.position_seconds > 5.0)
                     .map(|r| r.position_seconds)
                     .unwrap_or(0.0);
+                let resume_from = self.apply_resume_offset(raw_pos, None);
 
                 let saved_url = ep_record.and_then(|r| r.stream_url);
 
@@ -1476,7 +1477,7 @@ impl App {
 
     fn settings_max_rows(&self) -> usize {
         match self.settings_category {
-            0 => 5,  // audio, quality, skip, mpv_path, extra_args
+            0 => 6,  // audio, quality, skip, resume_offset, mpv_path, extra_args
             1 => 4,  // accent, progress_bar, complete_bar, reset
             2 => 3,  // image_protocol, results_limit, episode_cols
             3 => 1,
@@ -1486,13 +1487,13 @@ impl App {
 
     fn settings_is_text_field(&self) -> bool {
         matches!((self.settings_category, self.settings_row),
-            (0, 3) | (0, 4))  // mpv_path, extra_args (after skip row)
+            (0, 4) | (0, 5))  // mpv_path, extra_args (after skip+offset rows)
     }
 
     fn settings_current_text_value(&self) -> String {
         match (self.settings_category, self.settings_row) {
-            (0, 3) => self.config.player.mpv_path.clone(),
-            (0, 4) => self.config.player.extra_args.join(" "),
+            (0, 4) => self.config.player.mpv_path.clone(),
+            (0, 5) => self.config.player.extra_args.join(" "),
             (1, 1) => {
                 let accent = &self.config.theme.accent;
                 if crate::config::COLOR_PRESET_NAMES.contains(&accent.as_str()) {
@@ -1526,6 +1527,12 @@ impl App {
                 self.config.player.skip_segments =
                     cycle_str(&self.config.player.skip_segments.clone(), &opts, step).into();
             }
+            (0, 3) => {
+                // Resume offset: 0–60s in steps, ←/→ to change
+                let cur = self.config.player.resume_offset_secs as i32;
+                let next = (cur + step * 5).clamp(0, 60) as u32;
+                self.config.player.resume_offset_secs = next;
+            }
             // Theme: accent color (←/→ moves cursor, Enter/→ on + cell opens input)
             (1, 0) => { self.settings_color_move(0, step); }
             // Theme: progress bar color
@@ -1557,6 +1564,28 @@ impl App {
 
     fn settings_cycle_back(&mut self) {
         self.settings_cycle(-1);
+    }
+
+    /// Apply resume offset to a saved position, clamping away from intro range.
+    /// - Subtracts `resume_offset_secs` from `pos`
+    /// - Clamps result to 0.0 minimum
+    /// - If result lands inside the intro range, seeks to just after intro end
+    ///   (so the skip logic will fire immediately and push past it anyway)
+    pub fn apply_resume_offset(&self, pos: f64, skip_times: Option<&crate::api::allanime::SkipTimes>) -> f64 {
+        if pos <= 0.0 { return 0.0; }
+        let offset = self.config.player.resume_offset_secs as f64;
+        let raw    = (pos - offset).max(0.0);
+
+        // If we'd land inside the intro, start just after intro end so skip fires
+        if let Some(st) = skip_times {
+            if let Some(ref intro) = st.intro {
+                let skip_intro = matches!(self.config.player.skip_segments.as_str(), "intro" | "both");
+                if skip_intro && raw >= intro.start && raw < intro.end {
+                    return intro.end + 0.5;
+                }
+            }
+        }
+        raw
     }
 
     // ── Color row helpers ─────────────────────────────────────────────────────
@@ -2071,13 +2100,14 @@ impl App {
                     };
 
                     // Look up resume position from cached episode records
-                    let resume_from = self.anime_episode_records
+                    let raw_pos = self.anime_episode_records
                         .get(&ep_str)
                         .filter(|r| !r.fully_watched && r.position_seconds > 5.0)
                         .map(|r| r.position_seconds)
                         .unwrap_or(0.0);
+                    let resume_from = self.apply_resume_offset(raw_pos, None);
 
-                    if resume_from > 5.0 {
+                    if resume_from > 0.0 {
                         let mins = (resume_from / 60.0) as u64;
                         let secs = (resume_from as u64) % 60;
                         self.toast_info(format!("Resuming Ep {ep} from {mins}:{secs:02}…"));
