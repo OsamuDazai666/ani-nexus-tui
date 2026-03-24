@@ -26,7 +26,7 @@ A blazing-fast, strictly terminal-based UI for **Anime**. Experience website-qua
 ### Linux / macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/install.sh | bash
 ```
 
 The script automates:
@@ -39,7 +39,7 @@ The script automates:
 Open PowerShell and execute:
 
 ```powershell
-irm https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/install.ps1 | iex
 ```
 
 ---
@@ -50,13 +50,13 @@ If you ever need to remove `ani-nexus-tui`, you can run the provided uninstallat
 
 ### Linux / macOS
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/uninstall.sh | bash
 ```
 
 ### Windows
 Open PowerShell and execute:
 ```powershell
-irm https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/uninstall.ps1 | iex
 ```
 
 ---
