@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # ────────────────────────────────────────────────────────────────────────────
 # ani-nexus-tui uninstaller — Linux / macOS
-# Usage: bash <(curl -sSf https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/uninstall.sh)
+# Usage: bash <(curl -sSf https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/uninstall.sh)
 # ────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 INSTALL_DIR="${HOME}/.local/share/ani-nexus-tui"
-BIN_DIR="${HOME}/.local/bin"
-BINARY="${BIN_DIR}/ani-nexus"
+LEGACY_BIN_DIR="${HOME}/.local/bin"
+DIST_BIN_DIR="${CARGO_HOME:-${HOME}/.cargo}/bin"
+BINARY_NAME="ani-nexus"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -51,11 +52,18 @@ fi
 
 # ── Remove executable ─────────────────────────────────────────────────────────
 step "Removing executable binary"
-if [[ -f "$BINARY" ]]; then
-    rm -f "$BINARY"
-    ok "Deleted ${BINARY}"
-else
-    ok "Binary location already clean"
+removed_any=0
+for bin_dir in "$LEGACY_BIN_DIR" "$DIST_BIN_DIR"; do
+    binary_path="${bin_dir}/${BINARY_NAME}"
+    if [[ -f "$binary_path" ]]; then
+        rm -f "$binary_path"
+        ok "Deleted ${binary_path}"
+        removed_any=1
+    fi
+done
+
+if [[ $removed_any -eq 0 ]]; then
+    ok "Binary locations already clean"
 fi
 
 # ── Done ───────────────────────────────────────────────────────────────────────

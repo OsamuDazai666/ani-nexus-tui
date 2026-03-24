@@ -26,20 +26,20 @@ A blazing-fast, strictly terminal-based UI for **Anime**. Experience website-qua
 ### Linux / macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.sh | bash
 ```
 
 The script automates:
-- Downloading and building `ani-nexus` using Rust
-- Setting up the `mpv` video player
-- (Optional) Installing the Kitty terminal
+- Downloading the latest prebuilt `ani-nexus` release for your platform
+- Installing it through the generated release installer
+- Avoiding a local Rust build during install
 
 ### Windows
 
 Open PowerShell and execute:
 
 ```powershell
-irm https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/install.ps1 | iex
 ```
 
 ---
@@ -50,13 +50,13 @@ If you ever need to remove `ani-nexus-tui`, you can run the provided uninstallat
 
 ### Linux / macOS
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/uninstall.sh | bash
 ```
 
 ### Windows
 Open PowerShell and execute:
 ```powershell
-irm https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/OsamuDazai666/nexus-tui/main/uninstall.ps1 | iex
 ```
 
 ---
@@ -165,8 +165,8 @@ src/
    ```
 3. **Compile**  
    ```bash
-   git clone https://github.com/OsamuDazai666/ani-nexus-tui
-   cd ani-nexus-tui
+   git clone https://github.com/OsamuDazai666/nexus-tui
+   cd nexus-tui
    cargo build --release
    ```
 4. **Execute**  

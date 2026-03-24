@@ -1,9 +1,13 @@
-﻿# ─────────────────────────────────────────────────────────────────────────────
+$ErrorActionPreference = "Stop"
+$legacyInstallDir = Join-Path $env:APPDATA "ani-nexus-tui"
+$legacyBinDir = Join-Path $env:LOCALAPPDATA "Programs\ani-nexus-tui"
+$distBinDir = Join-Path $HOME ".cargo\bin"
+$binaryNames = @("ani-nexus.exe", "ani-nexus")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ani-nexus-tui uninstaller — Windows (PowerShell)
 # Run with: powershell -ExecutionPolicy Bypass -File uninstall.ps1
 # ─────────────────────────────────────────────────────────────────────────────
-$ErrorActionPreference = "Stop"
-
 trap {
     Write-Host ""
     Write-Host "    " -NoNewline
@@ -13,9 +17,6 @@ trap {
     Read-Host "Press Enter to exit"
     exit 1
 }
-
-$INSTALL_DIR = Join-Path $env:APPDATA "ani-nexus-tui"
-$BIN_DIR     = Join-Path $env:LOCALAPPDATA "Programs\ani-nexus-tui"
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 function Write-Header {
@@ -73,32 +74,46 @@ Write-Host ""
 
 # ── Remove source files ───────────────────────────────────────────────────────
 Write-Step "Removing source repository and build files"
-if (Test-Path $INSTALL_DIR) {
-    Remove-Item $INSTALL_DIR -Recurse -Force
-    Write-OK "Deleted $INSTALL_DIR"
+if (Test-Path $legacyInstallDir) {
+    Remove-Item $legacyInstallDir -Recurse -Force
+    Write-OK "Deleted $legacyInstallDir"
 } else {
     Write-OK "Source location already clean"
 }
 
 # ── Remove executable ─────────────────────────────────────────────────────────
 Write-Step "Removing executable binaries"
-if (Test-Path $BIN_DIR) {
-    Remove-Item $BIN_DIR -Recurse -Force
-    Write-OK "Deleted $BIN_DIR"
-} else {
-    Write-OK "Binary location already clean"
+$removedAny = $false
+
+if (Test-Path $legacyBinDir) {
+    Remove-Item $legacyBinDir -Recurse -Force
+    Write-OK "Deleted $legacyBinDir"
+    $removedAny = $true
+}
+
+foreach ($binaryName in $binaryNames) {
+    $binaryPath = Join-Path $distBinDir $binaryName
+    if (Test-Path $binaryPath) {
+        Remove-Item $binaryPath -Force
+        Write-OK "Deleted $binaryPath"
+        $removedAny = $true
+    }
+}
+
+if (-not $removedAny) {
+    Write-OK "Binary locations already clean"
 }
 
 # ── Remove from PATH ──────────────────────────────────────────────────────────
 Write-Step "Cleaning up user PATH"
 $userPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
 
-$paths = $userPath -split ";" | Where-Object { $_ -and $_ -ne $BIN_DIR -and $_ -ne "$BIN_DIR\" }
+$paths = $userPath -split ";" | Where-Object { $_ -and $_ -ne $legacyBinDir -and $_ -ne "$legacyBinDir\" }
 $newPath = $paths -join ";"
 
 if ($userPath -ne $newPath) {
     [System.Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
-    Write-OK "Removed $BIN_DIR from PATH"
+    Write-OK "Removed $legacyBinDir from PATH"
 } else {
     Write-OK "PATH already clean"
 }
