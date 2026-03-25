@@ -2,11 +2,21 @@
 name = "ani-nexus-tui"
 version = "0.1.0"
 edition = "2021"
-authors = ["you"]
+authors = ["OsamuDazai666"]
 description = "A blazing-fast TUI for Anime — website feel, terminal speed"
 license = "CC-BY-NC-SA-4.0"
 readme = "README.md"
 repository = "https://github.com/OsamuDazai666/nexus-tui"
+categories = ["command-line-utilities", "multimedia::video"]
+keywords = ["anime", "tui", "terminal", "cli"]
+exclude = [
+    "assets/*",
+    ".github/*",
+    "install.sh",
+    "install.ps1",
+    "uninstall.sh",
+    "uninstall.ps1"
+]
 
 [[bin]]
 name = "ani-nexus"
