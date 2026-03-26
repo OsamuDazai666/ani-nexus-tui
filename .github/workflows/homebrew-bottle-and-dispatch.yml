@@ -4,8 +4,9 @@ permissions:
   contents: write
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       release_tag:
@@ -14,11 +15,12 @@ on:
         type: string
 
 concurrency:
-  group: homebrew-bottle-${{ github.event.release.tag_name || inputs.release_tag }}
+  group: homebrew-bottle-${{ github.event.workflow_run.head_branch || inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   bottle-and-dispatch:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -30,7 +32,7 @@ jobs:
         id: tag
         shell: bash
         run: |
-          tag="${{ github.event.release.tag_name || inputs.release_tag }}"
+          tag="${{ github.event.workflow_run.head_branch || inputs.release_tag }}"
           if [[ -z "$tag" ]]; then
             echo "Release tag is required" >&2
             exit 1
@@ -45,7 +47,7 @@ jobs:
           set -euo pipefail
           tag="${{ steps.tag.outputs.value }}"
           repo="${{ github.repository }}"
-          max_attempts=20
+          max_attempts=10
           sleep_seconds=15
 
           for attempt in $(seq 1 "$max_attempts"); do
