@@ -1,6 +1,6 @@
 [package]
 name = "ani-nexus-tui"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["OsamuDazai666"]
 description = "A blazing-fast TUI for Anime — website feel, terminal speed"

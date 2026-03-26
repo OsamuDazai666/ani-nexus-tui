@@ -21,7 +21,16 @@ A blazing-fast, strictly terminal-based UI for **Anime**. Experience website-qua
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Installation
+
+### Homebrew
+
+```bash
+brew install OsamuDazai666/ani-nexus-tui/ani-nexus-tui
+ani-nexus-tui --version
+```
+
+Both `ani-nexus` and `ani-nexus-tui` commands are installed.
 
 ### Linux / macOS
 
@@ -29,17 +38,18 @@ A blazing-fast, strictly terminal-based UI for **Anime**. Experience website-qua
 curl -fsSL https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/install.sh | bash
 ```
 
-The script automates:
-- Downloading the latest prebuilt `ani-nexus` release for your platform
-- Installing it through the generated release installer
-- Avoiding a local Rust build during install
-
 ### Windows
 
 Open PowerShell and execute:
 
 ```powershell
 irm https://raw.githubusercontent.com/OsamuDazai666/ani-nexus-tui/main/install.ps1 | iex
+```
+
+### Compile from Source
+
+```bash
+cargo install ani-nexus-tui
 ```
 
 ---
@@ -148,32 +158,5 @@ src/
 ├── config.rs        # TOML configuration loader & saver
 └── player.rs        # Interactive MPV launcher & IPC stream resolution
 ```
-
----
-
----
-
-## 🛠 Building From Source
-
-1. **Install Rust**  
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
-2. **System Dependencies (Linux)**  
-   ```bash
-   sudo apt install build-essential pkg-config libssl-dev mpv
-   ```
-3. **Compile**  
-   ```bash
-   git clone https://github.com/OsamuDazai666/nexus-tui
-   cd nexus-tui
-   cargo build --release
-   ```
-4. **Execute**  
-   ```bash
-   ./target/release/ani-nexus
-   ```
-
----
 
 *Available under the [CC BY-NC-SA 4.0 License](LICENSE).*
