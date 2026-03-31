@@ -191,7 +191,13 @@ pub fn draw_episode_grid(f: &mut Frame, app: &mut App, area: Rect) {
     // Episode grid
     // Dynamic cell width — adapts to the longest episode number so 4+ digit
     // episodes (e.g. One Piece 1000+) keep the grid aligned.
-    let max_ep_len = app.episode_list.iter().map(|e| e.len()).max().unwrap_or(1).max(3);
+    let max_ep_len = app
+        .episode_list
+        .iter()
+        .map(|e| e.len())
+        .max()
+        .unwrap_or(1)
+        .max(3);
     let cell_w: usize = max_ep_len + 2; // e.g. " 1000 " = 6 for 4-digit eps
     let cell_slot = cell_w + 1; // cell + 1-char gap
     let cols_per_row = ((rows[1].width as usize).saturating_sub(2)) / cell_slot;

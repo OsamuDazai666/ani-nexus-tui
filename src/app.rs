@@ -535,7 +535,9 @@ impl App {
             }
 
             AppMsg::HistoryEpisodeList { anime_id, eps } => {
-                let _ = self.db.save_episodes_cache(&anime_id, &eps, &self.stream_mode);
+                let _ = self
+                    .db
+                    .save_episodes_cache(&anime_id, &eps, &self.stream_mode);
                 if let Ok(Some(updated)) = self.db.get(&anime_id) {
                     if let Some(pos) = self.history.iter().position(|e| e.id == anime_id) {
                         self.history[pos] = updated;
@@ -683,8 +685,7 @@ impl App {
 
                         // Anime tab: restore focus to episode grid and auto-advance
                         if self.active_tab == Tab::Anime
-                            && (self.focus == Focus::EpisodePrompt
-                                || self.focus == Focus::Detail)
+                            && (self.focus == Focus::EpisodePrompt || self.focus == Focus::Detail)
                         {
                             self.focus = Focus::EpisodePrompt;
                             if completion_pct > 0.9 {
@@ -694,8 +695,7 @@ impl App {
                                 {
                                     if idx + 1 < self.episode_list.len() {
                                         self.episode_list_idx = idx + 1;
-                                        self.episode_input =
-                                            self.episode_list[idx + 1].clone();
+                                        self.episode_input = self.episode_list[idx + 1].clone();
                                         self.episode_cursor = self.episode_input.len();
                                     }
                                 }
@@ -719,10 +719,8 @@ impl App {
                         {
                             self.focus = Focus::HistoryEpisodes;
                             if completion_pct > 0.9 {
-                                if let Some(idx) = self
-                                    .history_episode_list
-                                    .iter()
-                                    .position(|e| *e == episode)
+                                if let Some(idx) =
+                                    self.history_episode_list.iter().position(|e| *e == episode)
                                 {
                                     if idx + 1 < self.history_episode_list.len() {
                                         self.history_episode_idx = idx + 1;
@@ -751,9 +749,7 @@ impl App {
                                     .map(|s| s.as_str())
                                     .collect();
                                 self.history_ep_window_records.clear();
-                                if let Ok(recs) =
-                                    self.db.load_episodes_in(&anime_id, &window_eps)
-                                {
+                                if let Ok(recs) = self.db.load_episodes_in(&anime_id, &window_eps) {
                                     self.history_ep_window_start = start;
                                     self.history_ep_window_end = end;
                                     for rec in recs {

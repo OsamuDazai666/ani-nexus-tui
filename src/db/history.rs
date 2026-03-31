@@ -25,8 +25,8 @@ pub struct HistoryEntry {
     pub user_rating: Option<f32>, // 0.0–10.0
     pub notes: Option<String>,
     pub total_watch_seconds: i64,
-    pub progress: Option<u32>, // last watched episode number
-    pub total: Option<u32>,    // total episodes
+    pub progress: Option<u32>,  // last watched episode number
+    pub total: Option<u32>,     // total episodes
     pub status: Option<String>, // anime airing status ("Finished", "Releasing", etc.)
 
     // Episode list cache
@@ -95,7 +95,7 @@ impl HistoryEntry {
                 let max_age_hours = match self.status.as_deref() {
                     Some("Finished") | Some("Completed") => 7 * 24, // 7 days
                     Some("Releasing") | Some("Ongoing") | Some("Not Yet Aired") => 6, // 6 hours
-                    _ => 24, // default
+                    _ => 24,                                        // default
                 };
                 age.num_hours() >= max_age_hours
             }
@@ -177,12 +177,8 @@ impl HistoryStore {
         ",
         )?;
         // Add columns for existing databases (no-op if column already exists)
-        let _ = conn.execute_batch(
-            "ALTER TABLE anime ADD COLUMN episodes_cache_mode TEXT",
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE anime ADD COLUMN status TEXT",
-        );
+        let _ = conn.execute_batch("ALTER TABLE anime ADD COLUMN episodes_cache_mode TEXT");
+        let _ = conn.execute_batch("ALTER TABLE anime ADD COLUMN status TEXT");
         Ok(())
     }
 

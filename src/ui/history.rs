@@ -377,7 +377,15 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     draw_detail_cover(f, app, top_cols[0], detail_focused || episodes_focused);
-    draw_detail_meta(f, &entry, effective_total, &app.stream_mode, top_cols[1], detail_focused, episodes_focused);
+    draw_detail_meta(
+        f,
+        &entry,
+        effective_total,
+        &app.stream_mode,
+        top_cols[1],
+        detail_focused,
+        episodes_focused,
+    );
     draw_detail_gauge(f, &entry, effective_total, rows[1]);
 
     if has_episodes {
@@ -484,10 +492,7 @@ fn draw_detail_meta(
                     .fg(crate::ui::bar_complete())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  ({mode_label})"),
-                Style::default().fg(C_DIM),
-            ),
+            Span::styled(format!("  ({mode_label})"), Style::default().fg(C_DIM)),
         ])),
         (Some(p), None) => lines.push(Line::from(vec![
             Span::styled("  PROG    ", Style::default().fg(C_DIM)),
@@ -538,14 +543,8 @@ fn draw_detail_meta(
                 "  [↑↓] navigate  [Enter] play  [Tab] ",
                 Style::default().fg(C_DIM),
             ),
-            Span::styled(
-                other_mode,
-                Style::default().fg(crate::ui::accent_dim()),
-            ),
-            Span::styled(
-                "  [←] back",
-                Style::default().fg(C_DIM),
-            ),
+            Span::styled(other_mode, Style::default().fg(crate::ui::accent_dim())),
+            Span::styled("  [←] back", Style::default().fg(C_DIM)),
         ]));
     } else {
         lines.push(Line::from(vec![
@@ -580,7 +579,12 @@ fn draw_detail_meta(
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn draw_detail_gauge(f: &mut Frame, entry: &crate::db::history::HistoryEntry, effective_total: Option<u32>, area: Rect) {
+fn draw_detail_gauge(
+    f: &mut Frame,
+    entry: &crate::db::history::HistoryEntry,
+    effective_total: Option<u32>,
+    area: Rect,
+) {
     let pct = match (entry.progress, effective_total) {
         (Some(p), Some(t)) if t > 0 => (p as f64 / t as f64).clamp(0.0, 1.0),
         _ => 0.0,
@@ -630,14 +634,22 @@ fn draw_episode_list(
 
     let title = if loading {
         Span::styled(
-            format!(" {} EPISODES ({}) ", app.spinner.symbol(), app.stream_mode.to_uppercase()),
+            format!(
+                " {} EPISODES ({}) ",
+                app.spinner.symbol(),
+                app.stream_mode.to_uppercase()
+            ),
             Style::default()
                 .fg(crate::ui::accent())
                 .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
-            format!(" EPISODES ({})  {} ", app.stream_mode.to_uppercase(), ep_count),
+            format!(
+                " EPISODES ({})  {} ",
+                app.stream_mode.to_uppercase(),
+                ep_count
+            ),
             Style::default()
                 .fg(if focused { crate::ui::accent() } else { C_DIM })
                 .add_modifier(Modifier::BOLD),
