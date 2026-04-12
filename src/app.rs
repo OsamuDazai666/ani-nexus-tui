@@ -836,6 +836,7 @@ impl App {
         } else {
             tokio::spawn(async move {
                 let client = reqwest::Client::builder()
+                    .emulation(wreq_util::Emulation::Chrome140)
                     .user_agent("Mozilla/5.0")
                     .timeout(std::time::Duration::from_secs(15))
                     .build()
@@ -1087,6 +1088,7 @@ impl App {
                 // Full miss — fetch + decode
                 tokio::spawn(async move {
                     let client = reqwest::Client::builder()
+                        .emulation(wreq_util::Emulation::Chrome140)
                         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
                         .timeout(Duration::from_secs(15))
                         .connect_timeout(Duration::from_secs(8))
@@ -2455,6 +2457,7 @@ impl App {
                 let id = item_id.clone();
                 tokio::spawn(async move {
                     let client = reqwest::Client::builder()
+                        .emulation(wreq_util::Emulation::Chrome140)
                         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
                         .timeout(Duration::from_secs(15))
                         .connect_timeout(Duration::from_secs(8))

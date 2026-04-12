@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod browser_auth;
 mod config;
 mod db;
 mod player;

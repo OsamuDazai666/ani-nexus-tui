@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use tokio::time::{sleep, Duration};
 
 const ALLANIME_API: &str = "https://api.allanime.day/api";
 const ALLANIME_REFR: &str = "https://allmanga.to";
@@ -130,6 +131,7 @@ pub async fn search_allanime(query: &str, mode: &str) -> Result<Vec<AllAnimeItem
     );
 
     let client = reqwest::Client::builder()
+        .emulation(wreq_util::Emulation::Chrome140)
         .user_agent(AGENT)
         .timeout(std::time::Duration::from_secs(15))
         .default_headers({
@@ -143,16 +145,68 @@ pub async fn search_allanime(query: &str, mode: &str) -> Result<Vec<AllAnimeItem
         .build()
         .unwrap_or_default();
 
-    let text = client
-        .get(ALLANIME_API)
-        .query(&[("variables", &vars), ("query", &gql.to_string())])
-        .send()
-        .await?
-        .text()
-        .await?;
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut used_browser_fallback = false;
+    let mut text = String::new();
+    for attempt in 0..3u8 {
+        match client
+            .get(ALLANIME_API)
+            .query(&[("variables", &vars), ("query", &gql.to_string())])
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.text().await {
+                Ok(body) => {
+                    if looks_like_bot_challenge(&body) {
+                        last_err = Some(anyhow!(
+                            "AllAnime returned a bot-check/captcha page instead of JSON"
+                        ));
+                    } else {
+                        text = body;
+                        last_err = None;
+                        break;
+                    }
+                }
+                Err(e) => last_err = Some(anyhow!("AllAnime body read failed: {e}")),
+            },
+            Err(e) => last_err = Some(anyhow!("AllAnime request failed: {e}")),
+        }
 
-    let resp: GqlResponse =
-        serde_json::from_str(&text).map_err(|e| anyhow!("AllAnime parse error: {e}"))?;
+        if attempt < 2 {
+            sleep(Duration::from_millis(350 * (attempt as u64 + 1))).await;
+        }
+    }
+
+    if let Some(_e) = last_err {
+        text = crate::browser_auth::fetch_text_with_query(
+            ALLANIME_API,
+            &[
+                ("variables".to_string(), vars.clone()),
+                ("query".to_string(), gql.to_string()),
+            ],
+        )
+        .await
+        .map_err(|e| anyhow!("AllAnime browser fallback failed: {e}"))?;
+        used_browser_fallback = true;
+    }
+
+    let resp: GqlResponse = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) if !used_browser_fallback => {
+            let browser_text = crate::browser_auth::fetch_text_with_query(
+                ALLANIME_API,
+                &[
+                    ("variables".to_string(), vars),
+                    ("query".to_string(), gql.to_string()),
+                ],
+            )
+            .await
+            .map_err(|be| anyhow!("AllAnime parse error: {e}; browser fallback failed: {be}"))?;
+            serde_json::from_str(&browser_text)
+                .map_err(|pe| anyhow!("AllAnime parse error after browser fallback: {pe}"))?
+        }
+        Err(e) => return Err(anyhow!("AllAnime parse error: {e}")),
+    };
 
     let mut items: Vec<AllAnimeItem> = resp
         .data
@@ -226,6 +280,16 @@ fn strip_html(s: &str) -> String {
         .replace("&#x2014;", "—")
         .replace("<br>", "\n")
 }
+
+fn looks_like_bot_challenge(body: &str) -> bool {
+    let low = body.to_ascii_lowercase();
+    low.contains("<html")
+        || low.contains("cloudflare")
+        || low.contains("cf-chl")
+        || low.contains("captcha")
+        || low.contains("attention required")
+        || low.contains("/cdn-cgi/challenge-platform")
+}
 // ── MAL ID resolver via AniList ───────────────────────────────────────────────
 
 /// Resolve a MyAnimeList ID for an anime title via AniList's GraphQL API.
@@ -233,6 +297,7 @@ fn strip_html(s: &str) -> String {
 pub async fn resolve_mal_id(title: &str) -> Option<u32> {
     // Use Jikan (unofficial MAL API) — no auth needed, reliable
     let client = reqwest::Client::builder()
+        .emulation(wreq_util::Emulation::Chrome140)
         .user_agent(AGENT)
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -283,6 +348,7 @@ pub async fn fetch_skip_times(mal_id: u32, episode: u32) -> Option<SkipTimes> {
     skip_log(&format!("[nexus-skip] AniSkip URL: {url}"));
 
     let client = reqwest::Client::builder()
+        .emulation(wreq_util::Emulation::Chrome140)
         .user_agent(AGENT)
         .timeout(std::time::Duration::from_secs(8))
         .build()
