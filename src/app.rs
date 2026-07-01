@@ -1186,7 +1186,15 @@ impl App {
     }
 
     /// Prefetch episode lists for results[start..end] that aren't already cached.
+    /// Skipped when no AllAnime session cookies exist yet — speculative tasks
+    /// would otherwise queue behind the browser-auth lock during cold start.
+    /// The user-initiated request that triggered the search results will
+    /// produce cookies; the next prefetch call (e.g. on `MoreResults`) picks
+    /// them up.
     fn prefetch_episode_lists(&self, start: usize, end: usize) {
+        if !crate::browser_auth::has_session("api.allanime.day") {
+            return;
+        }
         let mode = self.stream_mode.clone();
         for item in self.results.get(start..end).unwrap_or(&[]) {
             let ContentItem::Anime(a) = item;

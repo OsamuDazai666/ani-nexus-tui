@@ -1,6 +1,6 @@
 [package]
 name = "ani-nexus-tui"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["OsamuDazai666"]
 description = "A blazing-fast TUI for Anime — website feel, terminal speed"
@@ -55,8 +55,6 @@ chrono           = { version = "0.4", features = ["serde"] }
 directories      = "5"
 strum            = { version = "0.26", features = ["derive"] }
 toml             = "0.8"
-chromiumoxide    = "0.9.1"
-futures-util     = "0.3"
 base64           = "0.22"
 sha2             = "0.10"
 aes              = "0.8"

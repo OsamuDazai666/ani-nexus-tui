@@ -6,11 +6,11 @@ use base64::Engine;
 use std::process::Command;
 use tokio::sync::mpsc;
 
-const ALLANIME_API: &str = "https://api.allanime.day/api";
-const ALLANIME_BASE: &str = "allanime.day";
-const ALLANIME_REFR: &str = "https://allmanga.to";
-const AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0";
+pub const ALLANIME_API: &str = "https://api.allanime.day/api";
+pub const ALLANIME_BASE: &str = "allanime.day";
+pub const ALLANIME_REFR: &str = "https://youtu-chan.com";
+pub const AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0";
 
 // ── Public event type ─────────────────────────────────────────────────────────
 
@@ -36,13 +36,19 @@ pub enum PlaybackEvent {
 
 // ── ani-cli AES-256-CTR decryption for AllAnime ───────────────────────────────
 
-use sha2::{Sha256, Digest};
 use aes::cipher::{KeyIvInit, StreamCipher};
 use ctr::Ctr32BE;
+use sha2::{Digest, Sha256};
 
-const ALLANIME_SECRET: &str = "SimtVuagFbGR2K7P";
+/// Derive the AES-256 key exactly as ani-cli does: SHA256("Xot36i3lK3:v1")
+fn allanime_key() -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"Xot36i3lK3:v1");
+    hasher.finalize().into()
+}
 
 /// Decrypt the base64-encoded `tobeparsed` data using AES-256-CTR.
+/// Matches ani-cli exactly: skip byte 0, IV at bytes 1-12 (12 bytes), ciphertext at 13..len-16, counter starts at 2.
 /// Robustly handles trailing garbage bytes by finding JSON boundary.
 fn decipher_tobeparsed(encoded: &str) -> Option<serde_json::Value> {
     // Base64 decode
@@ -54,19 +60,19 @@ fn decipher_tobeparsed(encoded: &str) -> Option<serde_json::Value> {
         }
     };
 
-    if decoded.len() < 12 {
+    // ani-cli format: byte 0 = unknown, bytes 1-12 = IV (12 bytes), bytes 13..len-16 = ciphertext, last 16 = auth tag
+    if decoded.len() < 1 + 12 + 16 {
         crate::debug_log!("Decoded data too short: {} bytes", decoded.len());
         return None;
     }
 
-    // Extract IV (first 12 bytes) and ciphertext (remaining bytes)
-    let iv = &decoded[0..12];
-    let ciphertext = &decoded[12..];
+    // Extract IV (bytes 1-12, skipping first byte)
+    let iv = &decoded[1..13];
+    // Extract ciphertext (bytes 13 to len-16, excluding 16-byte auth tag at end)
+    let ciphertext = &decoded[13..decoded.len() - 16];
 
     // Derive AES key: SHA-256 of the secret string
-    let mut hasher = Sha256::new();
-    hasher.update(ALLANIME_SECRET.as_bytes());
-    let key = hasher.finalize();
+    let key = allanime_key();
 
     // Construct 16-byte nonce for AES-256-CTR
     // Format: 12-byte IV + 4-byte counter starting at 00000002
@@ -121,8 +127,12 @@ fn extract_json_from_decrypted(plaintext: &[u8]) -> Option<serde_json::Value> {
 
             // Try to parse as JSON
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                crate::debug_log!("Found valid JSON ending at byte {}/{} (trimmed {} trailing bytes)",
-                    i, plaintext.len(), plaintext.len() - i);
+                crate::debug_log!(
+                    "Found valid JSON ending at byte {}/{} (trimmed {} trailing bytes)",
+                    i,
+                    plaintext.len(),
+                    plaintext.len() - i
+                );
                 return Some(v);
             }
         }
@@ -147,7 +157,8 @@ fn extract_json_from_decrypted(plaintext: &[u8]) -> Option<serde_json::Value> {
 
     // Final fallback: log what we found for debugging
     let preview_len = plaintext.len().min(200);
-    let valid_prefix_len = plaintext.iter()
+    let valid_prefix_len = plaintext
+        .iter()
         .position(|&b| b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t')
         .unwrap_or(plaintext.len());
 
@@ -160,7 +171,6 @@ fn extract_json_from_decrypted(plaintext: &[u8]) -> Option<serde_json::Value> {
 
     None
 }
-
 
 fn hex_decipher(s: &str) -> String {
     let pairs: Vec<&str> = (0..s.len())
@@ -801,7 +811,7 @@ async fn episodes_list(show_id: &str, mode: &str) -> Result<Vec<String>> {
     .map_err(|e| anyhow!("Episode-list request failed: {e}"))?;
 
     crate::debug_log!("episodes_list response: {} bytes", text.len());
-    
+
     let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
         crate::debug_log!("episodes_list JSON parse error: {e}");
         anyhow!("Episode-list parse error: {e}. Upstream likely returned non-JSON.")
@@ -836,47 +846,41 @@ async fn get_episode_url(
     quality: &str,
 ) -> Result<(String, Option<String>)> {
     crate::debug_log!("get_episode_url: id={id}, ep={ep}, mode={mode}");
-    let gql = r#"query ($showId: String!, $translationType: VaildTranslationTypeEnumType!, $episodeString: String!) { episode( showId: $showId translationType: $translationType episodeString: $episodeString ) { episodeString sourceUrls }}"#;
-    let vars = format!(
-        r#"{{"showId":"{}","translationType":"{}","episodeString":"{}"}}"#,
-        id, mode, ep
-    );
 
-    // Try POST with JSON body first (Cloudflare allows POST, blocks GET with query params)
-    let body = format!(r#"{{"query":"{}","variables":{}}}"#, gql.replace('"', "\\\""), vars);
-    crate::debug_log!("POST body: {body}");
-    
-    let text = match crate::browser_auth::fetch_post_json(ALLANIME_API, &body).await {
-        Ok(t) => t,
-        Err(e) => {
-            crate::debug_log!("POST failed, falling back to GET: {e}");
-            crate::browser_auth::fetch_text_with_query(
-                ALLANIME_API,
-                &[
-                    ("variables".to_string(), vars),
-                    ("query".to_string(), gql.to_string()),
-                ],
-            )
-            .await
-            .map_err(|e| anyhow!("Episode-source request failed: {e}"))?
-        }
-    };
+    // Use persisted query for episode sources (bypasses Cloudflare challenges)
+    let text = crate::browser_auth::fetch_episode_sources(id, mode, &ep.to_string())
+        .await
+        .map_err(|e| anyhow!("Episode-source request failed: {e}"))?;
 
     crate::debug_log!("get_episode_url response: {} bytes", text.len());
     crate::debug_log!("Response preview: {}", &text[..500.min(text.len())]);
-    
+
     let mut providers: Vec<(String, String)> = Vec::new();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
         crate::debug_log!("JSON parsed successfully");
-        
+        crate::debug_log!(
+            "Full JSON keys: {:?}",
+            json.as_object().map(|o| o.keys().collect::<Vec<_>>())
+        );
+        if let Some(data) = json.get("data") {
+            crate::debug_log!(
+                "data keys: {:?}",
+                data.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
+        }
+
         // Check for new API format with tobeparsed
         if let Some(tobeparsed) = json["data"]["tobeparsed"].as_str() {
-            crate::debug_log!("Found tobeparsed field, deciphering...");
+            crate::debug_log!(
+                "Found tobeparsed field ({} chars), deciphering...",
+                tobeparsed.len()
+            );
             if let Some(deciphered) = decipher_tobeparsed(tobeparsed) {
                 crate::debug_log!("Deciphered data: {:?}", deciphered);
                 // The deciphered data structure is: {"episode": {"episodeString": "1", "sourceUrls": [...]}}
                 // Extract sourceUrls from the nested episode object
-                let source_urls = deciphered["episode"]["sourceUrls"].as_array()
+                let source_urls = deciphered["episode"]["sourceUrls"]
+                    .as_array()
                     .or_else(|| deciphered.as_array()) // Fallback: handle if it's a raw array (old format)
                     .or_else(|| deciphered["sourceUrls"].as_array()); // Fallback: direct sourceUrls field
 
@@ -891,14 +895,24 @@ async fn get_episode_url(
                             crate::debug_log!("Entry {} missing sourceUrl", i);
                             continue;
                         };
-                        crate::debug_log!("Entry {}: name={}, url starts with --: {}", i, name, raw_url.starts_with("--"));
+                        crate::debug_log!(
+                            "Entry {}: name={}, url starts with --: {}",
+                            i,
+                            name,
+                            raw_url.starts_with("--")
+                        );
                         if let Some(encoded) = raw_url.strip_prefix("--") {
                             providers.push((name.to_string(), encoded.to_string()));
                         }
                     }
                 } else {
-                    crate::debug_log!("No sourceUrls array found in deciphered data. Keys: {:?}", deciphered.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                    crate::debug_log!(
+                        "No sourceUrls array found in deciphered data. Keys: {:?}",
+                        deciphered.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                    );
                 }
+            } else {
+                crate::debug_log!("decipher_tobeparsed returned None - decryption failed");
             }
         } else if let Some(arr) = json["data"]["episode"]["sourceUrls"].as_array() {
             // Old API format
@@ -912,13 +926,21 @@ async fn get_episode_url(
                     crate::debug_log!("Entry {} missing sourceUrl", i);
                     continue;
                 };
-                crate::debug_log!("Entry {}: name={}, url starts with --: {}", i, name, raw_url.starts_with("--"));
+                crate::debug_log!(
+                    "Entry {}: name={}, url starts with --: {}",
+                    i,
+                    name,
+                    raw_url.starts_with("--")
+                );
                 if let Some(encoded) = raw_url.strip_prefix("--") {
                     providers.push((name.to_string(), encoded.to_string()));
                 }
             }
         } else {
-            crate::debug_log!("Neither tobeparsed nor sourceUrls found");
+            crate::debug_log!("Neither tobeparsed nor sourceUrls found in data");
+            if let Some(errors) = json.get("errors") {
+                crate::debug_log!("GraphQL errors: {:?}", errors);
+            }
         }
     } else {
         crate::debug_log!("JSON parse failed");
@@ -1184,4 +1206,47 @@ fn client() -> reqwest::Client {
         })
         .build()
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn test_allanime_key_derivation() {
+        // Verify key matches ani-cli: SHA256("Xot36i3lK3:v1")
+        let mut hasher = Sha256::new();
+        hasher.update(b"Xot36i3lK3:v1");
+        let expected = hasher.finalize();
+        let actual = allanime_key();
+        assert_eq!(actual.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn test_hex_decipher_basic_mappings() {
+        // Test known mappings from the hex_decipher table
+        assert_eq!(hex_decipher("79"), "A");
+        assert_eq!(hex_decipher("7a"), "B");
+        assert_eq!(hex_decipher("7b"), "C");
+        assert_eq!(hex_decipher("59"), "a");
+        assert_eq!(hex_decipher("5a"), "b");
+        assert_eq!(hex_decipher("08"), "0");
+        assert_eq!(hex_decipher("09"), "1");
+        assert_eq!(hex_decipher("15"), "-");
+        assert_eq!(hex_decipher("16"), ".");
+        assert_eq!(hex_decipher("67"), "_");
+    }
+
+    #[test]
+    fn test_decipher_tobeparsed_structure() {
+        // Test that the function exists and handles empty/invalid input
+        assert!(decipher_tobeparsed("").is_none());
+        assert!(decipher_tobeparsed("invalid_base64!!!").is_none());
+
+        // Test with too-short valid base64
+        let short = base64::engine::general_purpose::STANDARD.encode(b"short");
+        assert!(decipher_tobeparsed(&short).is_none());
+    }
 }
