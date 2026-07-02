@@ -1,7 +1,9 @@
 mod api;
 mod app;
+mod browser_auth;
 mod config;
 mod db;
+mod debug_log;
 mod player;
 mod ui;
 

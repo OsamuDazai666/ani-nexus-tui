@@ -202,6 +202,12 @@ pub struct App {
     /// "switch" detection when window records are empty (no watched eps in range).
     pub history_ep_anime_id: Option<String>,
 
+    // Request deduplication + retry tracking for episode list loading
+    pub history_ep_request_id: Option<String>, // anime_id of in-flight request
+    pub history_ep_request_time: Option<std::time::Instant>, // when request started
+    pub history_ep_retry_count: u32,
+    pub history_ep_retry_after: Option<std::time::Instant>, // when to attempt next retry
+
     // Episode prompt + playback options
     pub episode_input: String,
     pub episode_cursor: usize,
@@ -305,6 +311,10 @@ impl App {
             history_ep_cols: 2,
             history_ep_window_records: std::collections::HashMap::new(),
             history_ep_anime_id: None,
+            history_ep_request_id: None,
+            history_ep_request_time: None,
+            history_ep_retry_count: 0,
+            history_ep_retry_after: None,
             episode_input: String::new(),
             episode_cursor: 0,
             episode_list: Vec::new(),
@@ -535,6 +545,12 @@ impl App {
             }
 
             AppMsg::HistoryEpisodeList { anime_id, eps } => {
+                // Clear request tracking and reset retry counter on success
+                self.history_ep_request_id = None;
+                self.history_ep_request_time = None;
+                self.history_ep_retry_count = 0;
+                self.history_ep_retry_after = None;
+
                 let _ = self
                     .db
                     .save_episodes_cache(&anime_id, &eps, &self.stream_mode);
@@ -775,6 +791,23 @@ impl App {
 
             AppMsg::Error(e) => {
                 self.is_searching = false;
+                // Reset episode loading state if this was an episode fetch error
+                if e.contains("Episode list:") {
+                    self.history_episodes_loading = false;
+                    self.history_ep_request_id = None;
+                    self.history_ep_request_time = None;
+                    // Schedule retry if we haven't exceeded max attempts
+                    if self.history_ep_retry_count < 3 {
+                        let delay_ms = 1000u64 * 2u64.pow(self.history_ep_retry_count);
+                        self.history_ep_retry_after = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(delay_ms),
+                        );
+                        self.history_ep_retry_count += 1;
+                    } else {
+                        // Max retries reached, reset counter
+                        self.history_ep_retry_count = 0;
+                    }
+                }
                 self.toast_error(e);
             }
         }
@@ -836,6 +869,7 @@ impl App {
         } else {
             tokio::spawn(async move {
                 let client = reqwest::Client::builder()
+                    .emulation(wreq_util::Emulation::Chrome140)
                     .user_agent("Mozilla/5.0")
                     .timeout(std::time::Duration::from_secs(15))
                     .build()
@@ -933,7 +967,34 @@ impl App {
         if self.history_episodes_loading {
             return;
         }
+
+        // Check if there's already an in-flight request for this anime (deduplication)
+        if let Some(ref request_id) = self.history_ep_request_id {
+            if request_id == &entry.id {
+                // Same anime already being fetched, check if request is stale (>30 seconds)
+                if let Some(start_time) = self.history_ep_request_time {
+                    if start_time.elapsed().as_secs() < 30 {
+                        return; // Request still in progress and not stale
+                    }
+                    // Stale request, clear it and continue
+                    self.history_ep_request_id = None;
+                    self.history_ep_request_time = None;
+                }
+            }
+        }
+
+        // Check if we should wait for scheduled retry
+        if let Some(retry_after) = self.history_ep_retry_after {
+            if std::time::Instant::now() < retry_after {
+                return; // Not time for retry yet
+            }
+            // Time to retry, clear the schedule
+            self.history_ep_retry_after = None;
+        }
+
         self.history_episodes_loading = true;
+        self.history_ep_request_id = Some(entry.id.clone());
+        self.history_ep_request_time = Some(std::time::Instant::now());
 
         let tx = self.msg_tx.clone();
         let anime_id = entry.id.clone();
@@ -1087,6 +1148,7 @@ impl App {
                 // Full miss — fetch + decode
                 tokio::spawn(async move {
                     let client = reqwest::Client::builder()
+                        .emulation(wreq_util::Emulation::Chrome140)
                         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
                         .timeout(Duration::from_secs(15))
                         .connect_timeout(Duration::from_secs(8))
@@ -1124,7 +1186,15 @@ impl App {
     }
 
     /// Prefetch episode lists for results[start..end] that aren't already cached.
+    /// Skipped when no AllAnime session cookies exist yet — speculative tasks
+    /// would otherwise queue behind the browser-auth lock during cold start.
+    /// The user-initiated request that triggered the search results will
+    /// produce cookies; the next prefetch call (e.g. on `MoreResults`) picks
+    /// them up.
     fn prefetch_episode_lists(&self, start: usize, end: usize) {
+        if !crate::browser_auth::has_session("api.allanime.day") {
+            return;
+        }
         let mode = self.stream_mode.clone();
         for item in self.results.get(start..end).unwrap_or(&[]) {
             let ContentItem::Anime(a) = item;
@@ -2455,6 +2525,7 @@ impl App {
                 let id = item_id.clone();
                 tokio::spawn(async move {
                     let client = reqwest::Client::builder()
+                        .emulation(wreq_util::Emulation::Chrome140)
                         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
                         .timeout(Duration::from_secs(15))
                         .connect_timeout(Duration::from_secs(8))
