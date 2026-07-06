@@ -139,6 +139,9 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      - name: Install NASM (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        run: choco install nasm --version 2.16.01 --no-progress
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
