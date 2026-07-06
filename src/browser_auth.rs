@@ -120,32 +120,6 @@ pub async fn fetch_episode_sources(show_id: &str, mode: &str, episode: &str) -> 
     Ok(extract_json_from_html(&text))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_json_from_html_pre_tag() {
-        let html = r#"<html><body><pre>{"data":{"test":123}}</pre></body></html>"#;
-        let result = extract_json_from_html(html);
-        assert_eq!(result, r#"{"data":{"test":123}}"#);
-    }
-
-    #[test]
-    fn test_extract_json_from_html_body_tag() {
-        let html = r#"<html><body>{"data":{"test":456}}</body></html>"#;
-        let result = extract_json_from_html(html);
-        assert_eq!(result, r#"{"data":{"test":456}}"#);
-    }
-
-    #[test]
-    fn test_extract_json_from_html_no_wrapper() {
-        let json = r#"{"data":{"test":789}}"#;
-        let result = extract_json_from_html(json);
-        assert_eq!(result, json);
-    }
-}
-
 /// Simple GET request for provider/embed pages (not the AllAnime API)
 /// Used for fetching video source pages from providers
 pub async fn fetch_text_from_url(url: &str) -> Result<String> {
@@ -180,4 +154,30 @@ pub fn looks_like_bot_challenge(body: &str) -> bool {
 /// Compatibility stub - always returns true since we no longer use browser sessions
 pub fn has_session(_domain: &str) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_json_from_html_pre_tag() {
+        let html = r#"<html><body><pre>{"data":{"test":123}}</pre></body></html>"#;
+        let result = extract_json_from_html(html);
+        assert_eq!(result, r#"{"data":{"test":123}}"#);
+    }
+
+    #[test]
+    fn test_extract_json_from_html_body_tag() {
+        let html = r#"<html><body>{"data":{"test":456}}</body></html>"#;
+        let result = extract_json_from_html(html);
+        assert_eq!(result, r#"{"data":{"test":456}}"#);
+    }
+
+    #[test]
+    fn test_extract_json_from_html_no_wrapper() {
+        let json = r#"{"data":{"test":789}}"#;
+        let result = extract_json_from_html(json);
+        assert_eq!(result, json);
+    }
 }

@@ -1428,10 +1428,8 @@ impl App {
                 }
             }
             // ↓ / Tab / Esc — move to results if they exist, otherwise stay
-            KeyCode::Down | KeyCode::Tab | KeyCode::Esc => {
-                if !self.results.is_empty() {
-                    self.focus = Focus::Results;
-                }
+            KeyCode::Down | KeyCode::Tab | KeyCode::Esc if !self.results.is_empty() => {
+                self.focus = Focus::Results;
             }
             _ => {}
         }
@@ -1471,10 +1469,12 @@ impl App {
             }
 
             // Ctrl+N → load next page
-            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.has_more && !self.is_searching {
-                    self.load_next_page().await;
-                }
+            KeyCode::Char('n')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.has_more
+                    && !self.is_searching =>
+            {
+                self.load_next_page().await;
             }
             _ => {}
         }

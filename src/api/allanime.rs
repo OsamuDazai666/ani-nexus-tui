@@ -315,15 +315,11 @@ pub async fn fetch_skip_times(mal_id: u32, episode: u32) -> Option<SkipTimes> {
         ) {
             let interval = SkipInterval { start, end };
             match skip_type {
-                "op" | "mixed-op" => {
-                    if times.intro.is_none() {
-                        times.intro = Some(interval);
-                    }
+                "op" | "mixed-op" if times.intro.is_none() => {
+                    times.intro = Some(interval);
                 }
-                "ed" | "mixed-ed" => {
-                    if times.outro.is_none() {
-                        times.outro = Some(interval);
-                    }
+                "ed" | "mixed-ed" if times.outro.is_none() => {
+                    times.outro = Some(interval);
                 }
                 _ => {}
             }
