@@ -903,6 +903,9 @@ async fn get_episode_url(
                         );
                         if let Some(encoded) = raw_url.strip_prefix("--") {
                             providers.push((name.to_string(), encoded.to_string()));
+                        } else if raw_url.starts_with("http") {
+                            // Direct video URL (e.g., tools.fast4speed.rsvp) - handle in get_links
+                            providers.push((name.to_string(), raw_url.to_string()));
                         }
                     }
                 } else {
@@ -934,6 +937,8 @@ async fn get_episode_url(
                 );
                 if let Some(encoded) = raw_url.strip_prefix("--") {
                     providers.push((name.to_string(), encoded.to_string()));
+                } else if raw_url.starts_with("http") {
+                    providers.push((name.to_string(), raw_url.to_string()));
                 }
             }
         } else {
@@ -959,6 +964,13 @@ async fn get_episode_url(
             ) {
                 providers.push((name_part.to_string(), url_part.to_string()));
             }
+            // Also try to extract direct HTTP URLs
+            if let (Some(url_part), Some(name_part)) = (
+                extract_between(line, "\"sourceUrl\":\"https://", "\""),
+                extract_between(line, "\"sourceName\":\"", "\""),
+            ) {
+                providers.push((name_part.to_string(), format!("https://{}", url_part)));
+            }
         }
     }
 
@@ -972,12 +984,18 @@ async fn get_episode_url(
     let client = client();
     let mut set = tokio::task::JoinSet::new();
 
-    for (_name, encoded) in &providers {
-        let path = hex_decipher(encoded);
+    for (name, encoded) in &providers {
+        // Direct HTTP URLs (e.g., fast4speed) don't need hex_decipher
+        let path = if encoded.starts_with("http") {
+            encoded.to_string()
+        } else {
+            hex_decipher(encoded)
+        };
         if path.is_empty() {
             continue;
         }
         let c = client.clone();
+        let _ = name;
         set.spawn(async move { get_links(&c, &path).await });
     }
 
@@ -1042,6 +1060,18 @@ async fn get_links(
     };
     crate::debug_log!("get_links: full_url={url}");
 
+    // Fast path: direct video URLs (e.g., tools.fast4speed.rsvp MP4 files)
+    // These return binary video data, not JSON provider pages.
+    // Detect early to avoid downloading large files unnecessarily.
+    if url.contains("tools.fast4speed.rsvp") {
+        crate::debug_log!("get_links: fast4speed direct URL detected, returning directly");
+        return Ok(vec![(
+            "1080p".to_string(),
+            url,
+            Some(ALLANIME_REFR.to_string()),
+        )]);
+    }
+
     // Use browser_auth which handles FlareSolverr -> visible browser fallback chain
     let response = match crate::browser_auth::fetch_text_from_url(&url).await {
         Ok(r) => {
@@ -1100,14 +1130,6 @@ async fn get_links(
                 links = m3u8_links;
             }
         }
-    }
-
-    if url.contains("tools.fast4speed.rsvp") && links.is_empty() {
-        links.push((
-            "Yt".to_string(),
-            url.clone(),
-            Some(ALLANIME_REFR.to_string()),
-        ));
     }
 
     Ok(links)
