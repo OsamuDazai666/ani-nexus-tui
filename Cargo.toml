@@ -70,3 +70,6 @@ strip           = true
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[workspace.metadata.dist]
+allow-dirty = true
