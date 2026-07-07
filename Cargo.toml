@@ -1,6 +1,6 @@
 [package]
 name = "ani-nexus-tui"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 authors = ["OsamuDazai666"]
 description = "A blazing-fast TUI for Anime — website feel, terminal speed"
@@ -70,6 +70,3 @@ strip           = true
 [profile.dist]
 inherits = "release"
 lto = "thin"
-
-[workspace.metadata.dist]
-allow-dirty = true
